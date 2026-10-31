@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+
+# Editors
+.idea/
+.vscode/
+
+# Private files and personal data
+.env
+*url*.txt
+*calen*.txt
+conversations.json
+memory.json
+settings.json
+state.json
+errors.log
+*.log
+chroma_db/
+
+# Voice, face and browser data
+voice_profile*
+face_data*
+*.npy
+*.pkl
+.jarvis_browser_profile/
+
+# Models and media (too big or private)
+voices/
+vosk-model*/
+*.onnx
+*.onnx.json
+*.gguf
+*.bin
+*.wav
+*.mp3
+
+# Launcher with personal paths
+jarvis.bat
+
+# OS junk
+Thumbs.db
+.DS_Store

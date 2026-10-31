@@ -1079,7 +1079,7 @@ def install_drop_target():
     """Lets you drag files onto the Jarvis window (needs: pip install windnd)."""
     def hook():
         try:
-            import windnd
+            windnd = __import__("windnd")
 
             def dropped(files):
                 for f in list(files)[:4]:

@@ -753,6 +753,348 @@ _READ_RES = [
 ]
 SEND_CONFIRM = set(YES_WORDS) | {"yes send it", "send it", "yes send", "go ahead", "yes go ahead"}
 
+# Live alerts: says "You have a new WhatsApp message from X, saying: ..." the moment one arrives.
+MESSAGE_ALERTS = True        # master switch (also: "turn off message alerts" / "turn on message alerts")
+ALERT_WHATSAPP = True
+ALERT_INSTAGRAM = True       # set False if you'd rather not keep an Instagram tab open in the background
+_alerts = {"wanted": MESSAGE_ALERTS}
+
+
+def on_social_alert(text):
+    """Called from the messaging thread the moment a new message is spotted."""
+    def run():
+        if S["asleep"]:
+            ui.log_line("sys", text)            # asleep: just show it, don't talk
+            return
+        with busy:
+            speak(text)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def start_message_alerts():
+    if _alerts["wanted"] and not S["asleep"]:
+        social_agent.start_alerts(on_social_alert, ALERT_WHATSAPP, ALERT_INSTAGRAM)
+
+
+# ---------- Sending images over WhatsApp ----------
+# "send my latest screenshot to mom", "send a photo of me to dad saying look at this",
+# "send a screenshot of my screen to riya", "send the photo called sunset to rahul"
+_IMG_SEND_RE = re.compile(
+    r"^(?:send|share|whatsapp|text)\s+(?:a\s+|an\s+|the\s+|my\s+|this\s+)?(.+?)\s+to\s+(.+?)"
+    r"(?:\s+(?:saying|with caption|with the caption|and say|with the message)\s+(.+))?$")
+_IMG_WHAT = re.compile(r"\b(photos?|pictures?|pics?|images?|screenshots?|selfie|screen)\b")
+_IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+
+
+def _image_folders():
+    home = os.path.expanduser("~")
+    out = []
+    for base in (home, os.path.join(home, "OneDrive")):
+        for sub in ("Pictures", os.path.join("Pictures", "Screenshots"), os.path.join("Pictures", "Camera Roll"),
+                    "Downloads", "Desktop"):
+            p = os.path.join(base, sub)
+            if os.path.isdir(p):
+                out.append(p)
+    return out
+
+
+def _latest_image(screenshots_only=False):
+    """Newest image in Pictures / Screenshots / Downloads / Desktop (screenshots kept apart from photos)."""
+    best, best_t = None, 0.0
+    for folder in _image_folders():
+        try:
+            for f in os.scandir(folder):
+                low = f.name.lower()
+                if not f.is_file() or not low.endswith(_IMG_EXTS):
+                    continue
+                is_shot = "screenshot" in low or "screen shot" in low or "screenshots" in folder.lower()
+                if is_shot != screenshots_only:
+                    continue
+                t = f.stat().st_mtime
+                if t > best_t:
+                    best, best_t = f.path, t
+        except OSError:
+            continue
+    return best
+
+
+def _find_image_by_name(query):
+    path = _resolve_file(query)
+    if path and path.lower().endswith(_IMG_EXTS):
+        return path
+    try:
+        found = [p for p in (file_agent.search_files(query) or []) if p.lower().endswith(_IMG_EXTS)]
+    except Exception:
+        found = []
+    return max(found, key=os.path.getmtime) if found else None
+
+
+def _save_capture(img):
+    """Saves a screen/camera capture to a temp PNG whatever type the capture is."""
+    import tempfile
+    path = os.path.join(tempfile.gettempdir(), f"jarvis_{int(time.time())}.png")
+    if isinstance(img, (bytes, bytearray)):
+        with open(path, "wb") as fh:
+            fh.write(img)
+    elif hasattr(img, "save"):                      # PIL image
+        img.save(path)
+    else:                                           # numpy array from OpenCV (BGR)
+        try:
+            import cv2
+            cv2.imwrite(path, img)
+        except ImportError:
+            from PIL import Image
+            Image.fromarray(img[..., ::-1]).save(path)
+    return path
+
+
+def _send_image_job(contact, path, caption, cleanup):
+    try:
+        return social_agent.send_whatsapp_image(contact, path, caption)
+    finally:
+        if cleanup:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+_SEND_DROPPED_RE = re.compile(
+    r"^(?:send|share|whatsapp|text)\s+(?:this|that|it|(?:this|that|the)\s+(?:image|photo|picture|pic)"
+    r"(?:\s+i\s+(?:dropped|gave you|uploaded))?)\s+to\s+(.+?)"
+    r"(?:\s+(?:saying|with caption|with the caption|and say|with the message)\s+(.+))?$")
+
+
+def _recent_dropped_image():
+    p = S.get("last_image")
+    if p and os.path.isfile(p) and time.time() - S.get("last_image_t", 0) < 600:
+        return p
+    return None
+
+
+def _confirm_send_image(contact, path, caption, label, shown=False, cleanup=False):
+    """Reads it back, sends only after a yes."""
+    cap = f' with the caption "{caption}"' if caption else ""
+    speak(f"Send {label} to {contact} on WhatsApp{cap}? Say yes to send.")
+    set_state("listening")
+    res = confirm_input(15)
+    ans = ""
+    if res:
+        ans, spoken = res
+        if spoken and ans:
+            emit("you", ans)
+    ok = ans.strip() in SEND_CONFIRM
+    if shown:
+        ui.end_vision(6 if ok else 1)
+    if not ok:
+        if cleanup:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        speak("Okay, I won't send it.")
+        return True
+    speak(f"Sending the image to {contact}.")
+    _social_bg("WhatsApp", _send_image_job, contact, path, caption, cleanup)
+    return True
+
+
+def handle_social_image_command(c):
+    low = c.lower()
+
+    # "send this image to mom" -> the picture you just dropped on the Jarvis window
+    m = _SEND_DROPPED_RE.match(low)
+    if m and _recent_dropped_image():
+        if "instagram" in low:
+            speak("I can only send WhatsApp images for now.")
+            return True
+        caption = (m.group(2) or "").strip()
+        caption = caption[0].upper() + caption[1:] if caption else ""
+        path = _recent_dropped_image()
+        return _confirm_send_image(m.group(1).strip(), path, caption, f"the image {os.path.basename(path)}")
+
+    m = _IMG_SEND_RE.match(low)
+    if not m:
+        return False
+    what, contact, caption = m.group(1).strip(), m.group(2).strip(), (m.group(3) or "").strip()
+    if not _IMG_WHAT.search(what) or not contact:
+        return False                                   # e.g. "send a message to mom ..." is a text
+    if "instagram" in low:
+        speak("I can only send WhatsApp images for now.")
+        return True
+    if caption:
+        caption = caption[0].upper() + caption[1:]
+
+    latest = bool(re.search(r"\b(latest|last|recent|newest|previous|saved)\b", what))
+    cleanup, shown, path, label = False, False, None, None
+    if not latest and re.search(r"\b(selfie|of me|of us|camera|webcam|take)\b", what):
+        source = "camera"
+    elif not latest and "screen" in what:
+        source = "screen"
+    else:
+        source = None
+
+    if source:
+        speak("Hold still." if source == "camera" else "One moment.")
+        set_state("thinking")
+        try:
+            img = ui.grab_screen() if source == "screen" else vision.grab_camera(CAMERA_INDEX)
+            path = _save_capture(img)
+        except Exception as e:
+            speak(str(e))
+            return True
+        ui.show_vision(img, "SCREEN CAPTURE" if source == "screen" else "CAMERA")
+        shown, cleanup = True, True
+        label = "a screenshot of your screen" if source == "screen" else "that photo"
+    else:
+        query = re.sub(r"\b(photos?|pictures?|pics?|images?|screenshots?|called|named|file|latest|last|recent|"
+                       r"newest|previous|saved|the|a|an|my)\b", " ", what).strip()
+        if query:
+            path = _find_image_by_name(query)
+        else:
+            path = _latest_image(screenshots_only="screenshot" in what)
+        if not path:
+            speak("I couldn't find that image.")
+            return True
+        label = f"the image {os.path.basename(path)}"
+
+    return _confirm_send_image(contact, path, caption, label, shown, cleanup)
+
+
+# ---------- Images (and files) dropped onto the Jarvis window ----------
+_DROP_IMG = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+_DROPPED_REF_RE = re.compile(
+    r"\b(?:this|that|the|last)\s+(?:image|picture|photo|pic)\b|"
+    r"\b(?:dropped|uploaded)\b.*\b(?:image|picture|photo|pic|screenshot|file)\b|"
+    r"\b(?:image|picture|photo|pic|screenshot)\b.*\b(?:dropped|uploaded)\b")
+
+
+def _load_dropped_image(path):
+    try:
+        from PIL import Image
+        img = Image.open(path)
+        img.load()
+        return img.convert("RGB")
+    except ImportError:
+        import cv2
+        img = cv2.imread(path)
+        if img is None:
+            raise ValueError("unreadable image")
+        return img
+
+
+def do_dropped_image(path, command=""):
+    """Same pipeline as the SEE SCREEN button, but for a picture you dropped on the window."""
+    name = os.path.basename(path)
+    speak(f"Let me take a look at {name}.")
+    set_state("thinking")
+    try:
+        img = _load_dropped_image(path)
+    except Exception as e:
+        speak(f"I couldn't open that image: {e}")
+        return
+    ui.show_vision(img, "DROPPED IMAGE")
+
+    ocr_text = ""
+    try:
+        ocr_text = vision.extract_text(img) or ""
+    except Exception:
+        pass
+
+    if not command or is_generic_look(command):
+        prompt = ("Describe this image in 3 or 4 short sentences. Mention people, objects, places "
+                  "and any important text or numbers.")
+    else:
+        prompt = command + ". Answer briefly, using only what is visible in the image."
+    if ocr_text:
+        prompt = f"Visible Text in Image: {ocr_text}\n\n{prompt}"
+
+    # most vision helpers take a PIL image; if yours wants a numpy array, the second try covers it
+    variants = [img]
+    try:
+        variants.append(np.array(img)[..., ::-1])
+    except Exception:
+        pass
+    desc, err = None, None
+    for candidate in variants:
+        try:
+            desc = vision.describe(URL, SET["vision_model"], prompt, candidate, VISION_KEEP_ALIVE, VISION_MAX_SIDE)
+            break
+        except Exception as e:
+            err = e
+    ui.end_vision(8)
+    if not desc:
+        speak(str(err) if err else "I couldn't make anything out.")
+        return
+
+    S["last_image"], S["last_image_t"] = path, time.time()
+    ui.log_line("sys", f"[image] {desc}")
+    if REPHRASE_VISION:
+        ask(f"(The user dropped an image file called {name} onto your window. A vision system reports: "
+            f"\"{desc}\". Using only that report, answer the user in character. "
+            f"User's request: {command or 'what is in this image?'})")
+    else:
+        speak(desc)
+
+
+def handle_dropped_file(path):
+    path = path.strip().strip('"')
+    if not os.path.isfile(path):
+        ui.log_line("sys", f"Can't open dropped item: {path}")
+        return
+    if S["asleep"]:
+        wake_up(announce=False)
+    name = os.path.basename(path)
+    emit("you", f"[drops {name}]")
+    if path.lower().endswith(_DROP_IMG):
+        S["last_image"], S["last_image_t"] = path, time.time()     # so "send this image to mom" works even if the look fails
+        do_dropped_image(path)
+    else:
+        S["dropped_file"], S["dropped_file_t"] = path, time.time()
+        S["last_file_matches"] = [path]
+        speak(f"Got {name}. Say summarize it, or read it.")
+
+
+def handle_dropped_followup(c):
+    """'what is in this picture', 'read the text in the image', 'summarize it' right after a drop."""
+    img = _recent_dropped_image()
+    if img and _DROPPED_REF_RE.search(c) and LOOK_RE.search(c):
+        do_dropped_image(img, c)
+        return True
+    f = S.get("dropped_file")
+    if f and os.path.isfile(f) and time.time() - S.get("dropped_file_t", 0) < 600:
+        m = re.match(r"^(summari[sz]e|read)\s+(?:it|that|this|the file|the document)$", c)
+        if m:
+            speak(f"Reading {os.path.basename(f)}...")
+            if m.group(1) == "read":
+                content = file_agent.read_file(f)
+                speak(content[:700] + (" ... and there is more." if len(content) > 700 else ""))
+            else:
+                speak(file_agent.summarize_file(f))
+            return True
+    return False
+
+
+def install_drop_target():
+    """Lets you drag files onto the Jarvis window (needs: pip install windnd)."""
+    def hook():
+        try:
+            import windnd
+
+            def dropped(files):
+                for f in list(files)[:4]:
+                    text_q.put("\x00drop:" + (f.decode("utf-8", "ignore") if isinstance(f, bytes) else str(f)))
+
+            windnd.hook_dropfiles(ui.root, func=dropped, force_unicode=True)
+        except ImportError:
+            ui.log_line("sys", "Drag & drop needs one install:  pip install windnd")
+        except Exception as e:
+            ui.log_line("sys", f"Drag & drop unavailable: {e}")
+    try:
+        ui.root.after(800, hook)                  # runs on the window's own thread once it exists
+    except Exception:
+        pass
+
 
 def _social_bg(label, fn, *args, **kw):
     """Runs a slow browser job in the background, then says the result once it is his turn to talk."""
@@ -768,6 +1110,20 @@ def _social_bg(label, fn, *args, **kw):
 
 def handle_social_command(c):
     c = c.lower()
+
+    # "turn off message alerts" / "turn on whatsapp notifications"
+    if re.search(r"\b(message|messages|whatsapp|instagram|social)\s+(alerts?|notifications?)\b", c):
+        if any(w in c for w in ("off", "stop", "disable", "mute", "pause")):
+            _alerts["wanted"] = False
+            threading.Thread(target=social_agent.stop_alerts, daemon=True).start()
+            speak("Message alerts off.")
+            return True
+        if any(w in c for w in ("on", "start", "enable", "resume")):
+            _alerts["wanted"] = True
+            threading.Thread(target=start_message_alerts, daemon=True).start()
+            speak("Message alerts on. I'll tell you as soon as something comes in.")
+            return True
+        return False
 
     # "read my messages from mom", "what did mom say", "what's mom saying"
     for rx in _READ_RES:
@@ -1945,6 +2301,7 @@ def go_to_sleep(announce=True):
         _theme["data"] = None
     gc.collect()
     set_eco(True)
+    threading.Thread(target=social_agent.stop_alerts, daemon=True).start()   # closes the background browser
     save_live_state()
     threading.Thread(target=_free_llm, args=(t,), daemon=True).start()
     set_state("sleep")
@@ -1966,6 +2323,7 @@ def wake_up(announce=True):
     load_whisper()
     get_voice(cur_key)
     threading.Thread(target=preload, daemon=True).start()     # reload the AI model in the background
+    threading.Thread(target=start_message_alerts, daemon=True).start()
     S["last"] = time.time()
     if announce:
         speak(woke_line())
@@ -3315,12 +3673,14 @@ def _route_impl(command):
         return
     if ultron_defy(c, command):
         return
+    if c and handle_dropped_followup(c):
+        return
     src = vision_request(c) if c else None
     if src:
         do_vision(src, c)
         return
     if c and (handle_memory_command(c) or handle_system_volume(c) or handle_calendar(c) or handle_time_date(c) 
-              or handle_social_send_command(c) or handle_social_command(c) or handle_jobs(c) or handle_audio(c)
+              or handle_social_image_command(c) or handle_social_send_command(c) or handle_social_command(c) or handle_jobs(c) or handle_audio(c)
               or handle_file_command(c) or handle_action(c)):
             return
     ask(command)
@@ -3355,6 +3715,8 @@ def handle_event(ev):
             wake_up(announce=False)
         emit("you", "[looks at the screen]" if arg == "screen" else "[looks through the camera]")
         do_vision("screen" if arg == "screen" else "camera")
+    elif kind == "drop":                             # a file was dropped on the window
+        handle_dropped_file(arg)
     elif kind == "sleep":
         go_to_sleep()
     elif kind == "wakeup":
@@ -3548,6 +3910,7 @@ def jarvis_loop():
 
         for fn in (get_start_apps, get_theme, text_loop, mic_watchdog, auto_sleep_watchdog):
             threading.Thread(target=fn, daemon=True).start()
+        start_message_alerts()
 
         # --- Face Recognition Background Thread ---
         FACE_CHECK_SECONDS = 30       # how often the camera is checked (its light blinks each time)
@@ -3675,6 +4038,7 @@ def jarvis_loop():
             print(f"Self-heal fallback error: {heal_err}")
 
 threading.Thread(target=jarvis_loop, daemon=True).start()
+install_drop_target()
 if START_AS_ORB:
     ui.skip_boot()
     ui.show_orb()

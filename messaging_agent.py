@@ -21,6 +21,14 @@ LAUNCH_ARGS = [
     "--disable-setuid-sandbox",
 ]
 
+# Prefer the real Google Chrome that is installed on the PC (WhatsApp and Instagram trust it far more than
+# Playwright's bundled Chromium). Falls back to the bundled one if Chrome isn't installed.
+BROWSER_CHANNEL = "chrome"
+
+WA_READY_SEL = "#pane-side, div[aria-label='Chat list'], div[data-testid='chat-list']"
+WA_QR_SEL = "canvas[aria-label*='scan' i], div[data-ref], div[data-testid='qrcode']"
+WA_DEBUG_SHOT = os.path.expanduser("~/jarvis_wa_debug.png")   # saved whenever WhatsApp fails to load
+
 _STOP = object()
 
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".gif")
@@ -73,6 +81,7 @@ class SocialAgent:
         self._ig_seeded = False
         self._retry_at = {"wa": 0.0, "ig": 0.0}
         self._login_warned = set()
+        self._wa_why = ""
 
         atexit.register(self.stop)
 
@@ -82,16 +91,20 @@ class SocialAgent:
     def _launch(self, p, headless):
         args = list(LAUNCH_ARGS)
         if headless:
-            # "New" headless behaves like a normal Chrome window. Playwright's
-            # default headless gets blocked by WhatsApp Web.
-            args.append("--headless=new")
-        ctx = p.chromium.launch_persistent_context(
+            # A truly headless browser gets blocked or half-loaded by WhatsApp Web. So "hidden" here means a
+            # normal window parked far off-screen: the site sees a normal browser, you see nothing.
+            args.append("--window-position=-32000,-32000")
+        kwargs = dict(
             user_data_dir=self.user_data_dir,
             headless=False,
             args=args,
             ignore_default_args=["--enable-automation"],
             viewport={"width": 1280, "height": 800},
         )
+        try:
+            ctx = p.chromium.launch_persistent_context(channel=BROWSER_CHANNEL, **kwargs)
+        except Exception:
+            ctx = p.chromium.launch_persistent_context(**kwargs)   # Chrome not installed: bundled Chromium
         ctx.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
@@ -257,16 +270,33 @@ class SocialAgent:
     # ================================================================== #
     # WhatsApp internals (worker thread)
     # ================================================================== #
-    def _wa_ready(self, timeout=25000):
-        """Makes sure the WhatsApp tab shows the chat list. Returns the page or None."""
+    def _wa_ready(self, timeout=20000):
+        """Makes sure the WhatsApp tab shows the chat list. Returns the page or None (see self._wa_why)."""
         page = self._page("wa")
-        if "web.whatsapp.com" not in page.url:
-            page.goto(WA_URL, wait_until="domcontentloaded")
+        self._wa_why = "the page didn't finish loading"
         try:
-            page.wait_for_selector("#pane-side, div[aria-label='Chat list']", timeout=timeout)
-            return page
-        except PWTimeout:
-            return None
+            if "web.whatsapp.com" not in page.url:
+                page.goto(WA_URL, wait_until="domcontentloaded", timeout=20000)
+            for attempt in range(2):
+                try:
+                    page.wait_for_selector(WA_READY_SEL, timeout=timeout)
+                    self._wa_why = ""
+                    return page
+                except PWTimeout:
+                    if attempt == 0:
+                        page.reload(wait_until="domcontentloaded", timeout=20000)   # stuck page: one fresh try
+        except Exception:
+            pass
+        try:
+            if page.locator(WA_QR_SEL).count() > 0:
+                self._wa_why = "it needs a QR scan (you're logged out)"
+        except Exception:
+            pass
+        try:
+            page.screenshot(path=WA_DEBUG_SHOT)   # look at this picture to see what the hidden browser saw
+        except Exception:
+            pass
+        return None
 
     def _wa_page_for_poll(self):
         """Like _wa_ready but never makes a poll wait long or hammer the site."""
@@ -460,14 +490,11 @@ class SocialAgent:
     # ================================================================== #
     @staticmethod
     def _fmt(platform, name, count, preview):
-        preview = (preview or "").strip()
-        if len(preview) > 200:
-            preview = preview[:200].rsplit(" ", 1)[0] + "..."
+        """Says only WHO messaged. The text itself is read out only when you ask
+        (e.g. "what did mom say" / "read my messages from mom")."""
         if count > 1:
-            head = f"You have {count} new {platform} messages from {name}"
-            return f"{head}. The latest says: {preview}" if preview else head + "."
-        head = f"You have a new {platform} message from {name}"
-        return f"{head}, saying: {preview}" if preview else head + "."
+            return f"You have {count} new {platform} messages from {name}."
+        return f"You have a new {platform} message from {name}."
 
     def _warn_login_once(self, key, text):
         if key not in self._login_warned:
@@ -511,7 +538,7 @@ class SocialAgent:
     def _job_check_whatsapp(self):
         page = self._wa_ready()
         if not page:
-            return "WhatsApp: Could not load or requires QR scan."
+            return f"WhatsApp: Could not open your chats, {self._wa_why}."
         unread = self._whatsapp_unread(page)
         if not unread:
             return "WhatsApp: No unread messages."
@@ -538,7 +565,7 @@ class SocialAgent:
     def _job_read_whatsapp(self, contact_name, limit, allow_partial):
         page = self._wa_ready()
         if not page:
-            return "WhatsApp: Could not load or requires QR scan."
+            return f"WhatsApp: Could not open your chats, {self._wa_why}."
         try:
             opened = self._open_whatsapp_chat(page, contact_name, allow_partial)
             if not opened:
@@ -568,7 +595,7 @@ class SocialAgent:
     def _job_send_whatsapp(self, contact_name, message_text, allow_partial):
         page = self._wa_ready()
         if not page:
-            return "Failed to send WhatsApp message: not loaded or requires QR scan."
+            return f"Failed to send WhatsApp message: {self._wa_why}."
         try:
             opened = self._open_whatsapp_chat(page, contact_name, allow_partial)
             if not opened:
@@ -612,7 +639,7 @@ class SocialAgent:
 
         page = self._wa_ready()
         if not page:
-            return "Failed to send the image: WhatsApp not loaded or requires QR scan."
+            return f"Failed to send the image: {self._wa_why}."
         try:
             opened = self._open_whatsapp_chat(page, contact_name, allow_partial)
             if not opened:

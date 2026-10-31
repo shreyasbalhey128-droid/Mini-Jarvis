@@ -699,11 +699,36 @@ class SocialAgent:
                 return (f"WhatsApp: I tried to send that to {opened} but couldn't confirm it went out. "
                         f"Please check the chat.")
 
-            try:   # wait for the little clock icon to clear so closing the chat can't interrupt delivery
-                page.wait_for_selector("span[data-icon='msg-time']", state="detached", timeout=8000)
-            except PWTimeout:
-                pass
-            return f"Successfully sent WhatsApp message to {opened}."
+            # The bubble is in the chat, but that alone doesn't mean it left: while WhatsApp Web is
+            # offline the message sits there with a clock icon. Only a tick (sent/delivered) counts.
+            row = page.locator("div[data-pre-plain-text]").last.locator(
+                "xpath=ancestor::*[@role='row' or contains(@class,'message-out')][1]"
+            )
+            delivered = False
+            if row.count() > 0:
+                for _ in range(40):                # up to ~20 seconds
+                    page.wait_for_timeout(500)
+                    try:
+                        if row.locator("[data-icon^='msg-check'], [data-icon^='msg-dblcheck']").count() > 0:
+                            delivered = True
+                            break
+                    except Exception:
+                        break
+            else:                                  # layout changed, can't read ticks: fall back to the clock icon
+                try:
+                    page.wait_for_selector("span[data-icon='msg-time']", state="detached", timeout=15000)
+                    delivered = True
+                except PWTimeout:
+                    delivered = False
+
+            if not delivered:
+                try:
+                    page.screenshot(path=WA_SEND_SHOT)
+                except Exception:
+                    pass
+                return (f"WhatsApp: the message to {opened} is stuck on sending, so it has NOT gone out. "
+                        f"Check that your phone and the internet are online, then try again.")
+            return f"Sent to {opened}. Delivery confirmed."
         finally:
             self._reset_wa(page)
 

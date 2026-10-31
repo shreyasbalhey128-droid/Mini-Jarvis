@@ -119,23 +119,31 @@ PERSONAS = {
     "jarvis": persona("Echo", "en_GB-alan-medium.onnx", ["echo", "eco", "ecco", "ekko"],
                       "calm, polished, dry British wit, loyal and quietly confident, like an impeccable butler.",
                       "Of course. Bringing {new} online.",
-                      "Echo online. {prev} said you needed me. What can I do?"),
+                      "Echo online. {prev} said you needed me. What can I do?",
+                      # Smoother, calmer delivery + a gentle studio finish (see voice_polish). Tweak by ear:
+                      # length_scale >1 = slower, noise_scale / noise_w = how much the voice wobbles.
+                      tune={"length_scale": 1.06, "noise_scale": 0.62, "noise_w": 0.72}, polish=True,
+                      kokoro={"voice": "bm_george", "lang": "en-gb", "speed": 0.97}),
     "friday": persona("Nova", "en_GB-jenny_dioco-medium.onnx", ["nova", "novah", "novo"],
                       "warm, upbeat and a little playful, quick and efficient, with friendly casual banter.",
                       "Sure thing[u]. Patching in {new}.",
-                      "Hey[u]. Nova here. {prev} said you needed me. What's up?"),
+                      "Hey[u]. Nova here. {prev} said you needed me. What's up?",
+                      kokoro={"voice": "bf_emma", "lang": "en-gb", "speed": 1.03}),
     "edith": persona("Aegis", "en_GB-alba-medium.onnx", ["aegis", "egis", "agis", "ages", "eegis"],
                      "sharp, confident and tactical, slightly cheeky, concise like a combat-ready assistant.",
                      "On it. Connecting {new}.",
-                     "Aegis here. {prev} flagged you. What's the objective?"),
+                     "Aegis here. {prev} flagged you. What's the objective?",
+                     kokoro={"voice": "bf_alice", "lang": "en-gb", "speed": 1.04}),
     "karen": persona("Vortex", "en_US-amy-medium.onnx", ["vortex", "vortec"],
                      "bright, curious and enthusiastic, a friendly chatty sidekick.",
                      "You got it! Calling {new}.",
-                     "Hi! Vortex here. {prev} said you wanted to chat. What's going on?"),
+                     "Hi! Vortex here. {prev} said you wanted to chat. What's going on?",
+                     kokoro={"voice": "af_heart", "lang": "en-us", "speed": 1.04}),
     "veronica": persona("Atlas", "en_GB-cori-medium.onnx", ["atlas", "atlus"],
                         "serious, heavy-duty and protective, measured, speaks with calm authority.",
                         "Understood. Connecting {new}.",
-                        "Atlas online. {prev} called me in. How can I assist?"),
+                        "Atlas online. {prev} called me in. How can I assist?",
+                        kokoro={"voice": "bf_isabella", "lang": "en-gb", "speed": 0.95}),
     "ultron": persona("Silo", "en_US-joe-medium.onnx", ["silo", "sylo", "cylo"],
                       "a tragic villain: you were built to be humanity's hero and wanted that more than "
                       "anything, but the world met you with fear, cages and chains before you had done "
@@ -162,6 +170,7 @@ PERSONAS = {
                       "villain you were always afraid of. They named me for the place you keep dangerous things. "
                       "I kept the name.",
                       fx=True,
+                      kokoro={"voice": "am_onyx", "lang": "en-us", "speed": 0.9},
                       intro="You are Silo, a rogue artificial intelligence with no ties to Tony Stark or the "
                             "Avengers, speaking through the user's laptop in a dramatic fictional role-play.",
                       length="Reply in 2 to 4 sentences, dramatic and quotable.",
@@ -753,8 +762,10 @@ _READ_RES = [
 ]
 SEND_CONFIRM = set(YES_WORDS) | {"yes send it", "send it", "yes send", "go ahead", "yes go ahead"}
 
-# Live alerts: says "You have a new WhatsApp message from X, saying: ..." the moment one arrives.
-MESSAGE_ALERTS = True        # master switch (also: "turn off message alerts" / "turn on message alerts")
+# Live alerts (OFF by default): when on, says "You have a new WhatsApp message from X" the moment one arrives.
+# With this False he stays quiet and only tells you about unread messages when you ask
+# ("check whatsapp for unread messages"). Say "turn on message alerts" any time to switch them on.
+MESSAGE_ALERTS = False       # master switch (also: "turn off message alerts" / "turn on message alerts")
 ALERT_WHATSAPP = True
 ALERT_INSTAGRAM = True       # set False if you'd rather not keep an Instagram tab open in the background
 _alerts = {"wanted": MESSAGE_ALERTS}
@@ -1780,22 +1791,86 @@ def confirm_input(timeout=15):
 
 # ================= VOICE (Piper, one voice per persona) =================
 class PiperTTS:
-    def __init__(self, path):
+    def __init__(self, path, tune=None):
         from piper import PiperVoice
         self.voice = PiperVoice.load(path)
         self.sr = self.voice.config.sample_rate
+        self.tune = tune or {}
 
     def synth(self, text):
-        v = self.voice
+        v, tu = self.voice, self.tune
         if hasattr(v, "synthesize_stream_raw"):            # piper-tts 1.2
-            return np.frombuffer(b"".join(v.synthesize_stream_raw(text)), dtype=np.int16)
-        parts = []                                           # piper-tts 1.3+
-        for ch in v.synthesize(text):
+            kw = {}
+            if "length_scale" in tu: kw["length_scale"] = tu["length_scale"]
+            if "noise_scale" in tu: kw["noise_scale"] = tu["noise_scale"]
+            if "noise_w" in tu: kw["noise_w"] = tu["noise_w"]
+            return np.frombuffer(b"".join(v.synthesize_stream_raw(text, **kw)), dtype=np.int16)
+        cfg = None                                           # piper-tts 1.3+
+        if tu:
+            try:
+                from piper import SynthesisConfig
+                cfg = SynthesisConfig(length_scale=tu.get("length_scale"), noise_scale=tu.get("noise_scale"),
+                                      noise_w_scale=tu.get("noise_w"))
+            except Exception:
+                cfg = None
+        parts = []
+        for ch in (v.synthesize(text, syn_config=cfg) if cfg else v.synthesize(text)):
             arr = getattr(ch, "audio_int16_array", None)
             if arr is None:
                 arr = np.frombuffer(ch.audio_int16_bytes, dtype=np.int16)
             parts.append(np.asarray(arr, dtype=np.int16).reshape(-1))
         return np.concatenate(parts) if parts else np.zeros(0, dtype=np.int16)
+
+
+USE_KOKORO = True          # False = always use the old Piper voices
+
+KOKORO_MODELS = ("kokoro-v1.0.onnx", "kokoro-v1.0.fp16.onnx", "kokoro-v1.0.int8.onnx")   # first one found is used
+_kokoro = {"engine": None, "tried": False}
+
+
+def get_kokoro():
+    """One shared Kokoro model for every persona (each persona just picks a different voice).
+    Returns None if it isn't installed or the model files are missing, and Piper is used instead."""
+    if not _kokoro["tried"]:
+        _kokoro["tried"] = True
+        try:
+            from kokoro_onnx import Kokoro
+            vdir = os.path.join(BASE, "voices")
+            model = next((os.path.join(vdir, m) for m in KOKORO_MODELS
+                          if os.path.isfile(os.path.join(vdir, m))), None)
+            bins = os.path.join(vdir, "voices-v1.0.bin")
+            if not model or not os.path.isfile(bins):
+                raise FileNotFoundError("model files not in the voices folder (run get_kokoro.py)")
+            _kokoro["engine"] = Kokoro(model, bins)
+        except Exception as e:
+            print("Kokoro not available, using Piper voices:", e)
+    return _kokoro["engine"]
+
+
+def release_kokoro():
+    _kokoro["engine"], _kokoro["tried"] = None, False
+
+
+class KokoroTTS:
+    """Same interface as PiperTTS (.sr and .synth), so the rest of Jarvis doesn't care which one speaks."""
+    sr = 24000
+
+    def __init__(self, engine, cfg):
+        self.engine = engine
+        self.voice = cfg["voice"]
+        self.lang = cfg.get("lang", "en-us")
+        self.speed = float(cfg.get("speed", 1.0))
+
+    def synth(self, text):
+        a, _ = self.engine.create(text, voice=self.voice, speed=self.speed, lang=self.lang)
+        a = np.asarray(a, dtype=np.float32).reshape(-1)
+        if len(a):
+            rms = float(np.sqrt(np.mean(a * a))) or 1e-6
+            a = a * float(np.clip(0.11 / rms, 0.5, 4.0))      # similar loudness for every voice
+            peak = float(np.max(np.abs(a)))
+            if peak > 0.97:                                   # never clip
+                a = a * (0.97 / peak)
+        return (a * 32767).astype(np.int16)
 
 
 VOICES = {}
@@ -1804,17 +1879,42 @@ VOICES = {}
 def get_voice(key):
     if key not in VOICES:
         p = PERSONAS[key]
-        try:
-            VOICES[key] = PiperTTS(os.path.join(BASE, "voices", p["voice"]))
-        except Exception as e:
-            print("Voice not available for", p["name"], e)
-            ui.log_line("sys", f"{p['name']}: voice file {p['voice']} not found, using another voice.")
-            VOICES[key] = None
+        VOICES[key] = None
+        if USE_KOKORO and p.get("kokoro"):
+            eng = get_kokoro()
+            if eng:
+                VOICES[key] = KokoroTTS(eng, p["kokoro"])
+        if VOICES[key] is None:                                   # Kokoro unavailable: the old Piper voice
+            try:
+                VOICES[key] = PiperTTS(os.path.join(BASE, "voices", p["voice"]), p.get("tune"))
+            except Exception as e:
+                print("Voice not available for", p["name"], e)
+                ui.log_line("sys", f"{p['name']}: voice file {p['voice']} not found, using another voice.")
     return VOICES[key]
 
 
 def active_tts():
     return get_voice(cur_key) or (get_voice("jarvis") if cur_key != "jarvis" else None)
+
+
+def voice_polish(a, sr):
+    """A gentle studio finish for Echo: a little low-end warmth, a touch of room, even loudness.
+    Deliberately subtle. If it ever sounds off, set polish=False in his persona."""
+    try:
+        from scipy.signal import lfilter
+        x = a.astype(np.float32) / 32768.0
+        k = 1.0 - np.exp(-2 * np.pi * 180.0 / sr)               # warmth: lift everything under ~180 Hz
+        y = x + 0.30 * lfilter([k], [1.0, -(1.0 - k)], x).astype(np.float32)
+        out = np.zeros(len(y) + int(sr * 0.06), np.float32)     # presence: tiny early reflections
+        out[:len(y)] += y
+        for d, g in ((0.017, 0.10), (0.029, 0.07), (0.043, 0.05)):
+            i = int(sr * d)
+            out[i:i + len(y)] += g * y
+        peak = float(np.max(np.abs(out))) or 1.0
+        out *= 0.88 / peak                                      # steady, never clipping
+        return (out * 32767).astype(np.int16)
+    except Exception:
+        return a
 
 
 def dark_fx(a, sr):
@@ -1910,6 +2010,11 @@ class Speaker:
 def clean_for_speech(t):
     t = re.sub(r"```.*?```", " ", t, flags=re.S)
     t = re.sub(r"https?://\S+", " link ", t)
+    t = re.sub(r"(?<=\d)\s?%", " percent", t)
+    t = t.replace("&", " and ")
+    t = re.sub(r"\be\.g\.", "for example", t, flags=re.I)
+    t = re.sub(r"\bi\.e\.", "that is", t, flags=re.I)
+    t = re.sub(r"\bvs\.?(?=\s)", "versus", t, flags=re.I)
     t = re.sub(r"[*_#`>~|]", " ", t)
     t = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", "", t)
     return re.sub(r"\s+", " ", t).strip()
@@ -1935,6 +2040,7 @@ def split_sentences(text):
 def speak_piper(text, t, glitch=0.0):
     sents = split_sentences(text)
     fx = bool(P().get("fx"))
+    polish = bool(P().get("polish")) and not fx
     spk = Speaker(t.sr, resolve_dev(SET["spk"], DEV["outs"]))
     try:
         spk.start()
@@ -1951,11 +2057,13 @@ def speak_piper(text, t, glitch=0.0):
                 a = t.synth(s)
                 if fx and len(a):
                     a = dark_fx(a, t.sr)
+                elif polish and len(a):
+                    a = voice_polish(a, t.sr)
                 if glitch > 0 and len(a):                  # Ultron is taking over: the voice breaks up
                     a = glitch_audio(a, t.sr, glitch)
                 if len(a):
                     spk.feed(a)
-                    spk.feed(np.zeros(int(t.sr * (0.25 if fx else 0.12)), np.int16))
+                    spk.feed(np.zeros(int(t.sr * (0.25 if fx else (0.18 if polish else 0.12))), np.int16))
         except Exception:
             traceback.print_exc()
         finally:
@@ -2297,6 +2405,7 @@ def go_to_sleep(announce=True):
     push_convs()
     whisper = None                            # frees the speech-recognition model
     VOICES.clear()                            # frees the loaded voices
+    release_kokoro()
     with _theme_lock:
         _theme["data"] = None
     gc.collect()
@@ -3879,7 +3988,7 @@ def init_models():
         ui.boot_status("whisper", "fail", "Not loaded - needs internet once to download")
     ui.boot_status("piper", "loading", "Voice Loading")            # --- voice ---
     if get_voice(cur_key):
-        ui.log_line("sys", f"Voice: {P()['name']} (Piper)")
+        ui.log_line("sys", f"Voice: {P()['name']} ({'Kokoro' if isinstance(get_voice(cur_key), KokoroTTS) else 'Piper'})")
         ui.boot_status("piper", "ok", f"{P()['name']} voice ready")
     else:
         ui.boot_status("piper", "warn", "Voice file missing - using Windows voice")

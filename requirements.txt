@@ -50,6 +50,7 @@ importlib_resources==7.1.0
 joblib==1.6.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
+kokoro-onnx==0.6.1
 kubernetes==37.0.1
 lazy-loader==0.6
 librosa==0.11.0

@@ -17,8 +17,6 @@ IG_LOGIN_URL = "https://www.instagram.com/accounts/login/"
 # the login session and the background session.
 LAUNCH_ARGS = [
     "--disable-blink-features=AutomationControlled",
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
 ]
 
 # Prefer the real Google Chrome that is installed on the PC (WhatsApp and Instagram trust it far more than
@@ -28,6 +26,12 @@ BROWSER_CHANNEL = "chrome"
 WA_READY_SEL = "#pane-side, div[aria-label='Chat list'], div[data-testid='chat-list']"
 WA_QR_SEL = "canvas[aria-label*='scan' i], div[data-ref], div[data-testid='qrcode']"
 WA_DEBUG_SHOT = os.path.expanduser("~/jarvis_wa_debug.png")   # saved whenever WhatsApp fails to load
+WA_SEND_SHOT = os.path.expanduser("~/jarvis_wa_send_debug.png")   # saved when a send can't be confirmed
+IG_DEBUG_SHOT = os.path.expanduser("~/jarvis_ig_debug.png")   # saved whenever Instagram fails to load
+# If the browser lands on any of these instead of the inbox, you are logged out or Instagram wants a security check.
+IG_READY_SEL = ("a[href^='/direct/t/'], div[role='main'], main, div[role='grid'], "
+               "div[role='list'], div[role='listbox']")
+IG_BLOCK_URL_PARTS = ("login", "auth_platform", "recaptcha", "challenge", "checkpoint", "accounts/suspended")
 
 _STOP = object()
 
@@ -82,6 +86,7 @@ class SocialAgent:
         self._retry_at = {"wa": 0.0, "ig": 0.0}
         self._login_warned = set()
         self._wa_why = ""
+        self._ig_why = ""
 
         atexit.register(self.stop)
 
@@ -421,16 +426,42 @@ class SocialAgent:
             except Exception:
                 break
 
+    def _ig_shot(self, page):
+        try:
+            page.screenshot(path=IG_DEBUG_SHOT)   # look at this picture to see what the browser saw
+        except Exception:
+            pass
+
     def _ig_open_inbox(self, page, reload=False):
-        """Goes to the inbox if needed. Returns False if you're not logged in."""
-        if reload or "instagram.com/direct" not in page.url:
-            page.goto(IG_INBOX_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
-        if "login" in page.url:
+        """Goes to the inbox if needed. Returns False if the inbox can't be reached (see self._ig_why)."""
+        self._ig_why = "the inbox didn't finish loading"
+        try:
+            if reload or "instagram.com/direct" not in page.url:
+                page.goto(IG_INBOX_URL, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(3000)
+            if (any(part in page.url for part in IG_BLOCK_URL_PARTS)
+                    or page.locator("input[name='username']").count() > 0):
+                self._ig_why = "you're logged out, or Instagram is asking for a security check"
+                self._ig_shot(page)
+                return False
+            try:
+                page.wait_for_load_state("load", timeout=15000)
+            except PWTimeout:
+                pass
+            self._dismiss_ig_popups(page)
+            try:
+                page.wait_for_selector(IG_READY_SEL, timeout=20000)
+            except PWTimeout:
+                # Instagram changes its page structure often. If we're still on the inbox URL and not on a
+                # login / security-check page, carry on instead of failing; the picture shows what it saw.
+                self._ig_shot(page)
+                if "instagram.com/direct" not in page.url:
+                    return False
+            self._ig_why = ""
+            return True
+        except Exception:
+            self._ig_shot(page)
             return False
-        self._dismiss_ig_popups(page)
-        page.wait_for_selector("div[role='grid'], div[role='main']", timeout=15000)
-        return True
 
     def _ig_page_for_poll(self):
         page = self._page("ig")
@@ -442,14 +473,14 @@ class SocialAgent:
         self._retry_at["ig"] = time.time() + 60
         if self._ig_open_inbox(page):
             return page
-        self._warn_login_once("ig", "Instagram isn't logged in. Run the Instagram login setup.")
+        self._warn_login_once("ig", f"I can't open Instagram: {self._ig_why}. Run the Instagram login setup if you're logged out.")
         return None
 
     def _ig_unread_count(self, page):
         # NOTE: Instagram's class names (like _ac5f) are auto-generated and change
         # without warning. If this stops finding unread DMs, this is the line to fix.
         unread = page.locator(
-            "div[role='listitem'] div._ac5f, div._ac5f, span[data-testid='unread-badge']"
+            "div[role='listitem'] div._ac5f, div._ac5f, span[data-testid='unread-badge'], [aria-label*='unread' i]"
         )
         return unread.count()
 
@@ -548,7 +579,7 @@ class SocialAgent:
     def _job_check_instagram(self):
         page = self._page("ig")
         if not self._ig_open_inbox(page):
-            return "Instagram: Session expired or not logged in. Please run setup login."
+            return f"Instagram: Could not open your inbox, {self._ig_why}. Run the login setup if you're logged out."
         count = self._ig_unread_count(page)
         if count == 0:
             return "Instagram: No unread DMs found."
@@ -592,6 +623,19 @@ class SocialAgent:
         finally:
             self._reset_wa(page)
 
+    @staticmethod
+    def _norm(text):
+        return re.sub(r"\s+", " ", text or "").strip().lower()
+
+    def _wa_last_message(self, page):
+        """(count, text) of the newest text message bubble in the open chat."""
+        msgs = page.locator("div[data-pre-plain-text]")
+        try:
+            n = msgs.count()
+            return n, (msgs.last.inner_text(timeout=1500) if n else "")
+        except Exception:
+            return 0, ""
+
     def _job_send_whatsapp(self, contact_name, message_text, allow_partial):
         page = self._wa_ready()
         if not page:
@@ -600,13 +644,65 @@ class SocialAgent:
             opened = self._open_whatsapp_chat(page, contact_name, allow_partial)
             if not opened:
                 return f"Didn't send: no exact contact named {contact_name}. Nothing was sent."
+
             msg_box = page.locator(
                 "footer div[contenteditable='true'], div[aria-label='Type a message']"
             ).first
+            msg_box.wait_for(state="visible", timeout=10000)
+            try:
+                page.wait_for_selector("div[data-pre-plain-text]", timeout=4000)   # let the chat finish loading
+            except PWTimeout:
+                pass                                                              # empty chat is fine
+            page.wait_for_timeout(500)
+            before_n, before_text = self._wa_last_message(page)
+
             msg_box.click()
-            msg_box.fill(message_text)
+            # Real typing, not fill(): fill() can leave WhatsApp's editor thinking the box is empty,
+            # so Enter then sends nothing.
+            page.keyboard.insert_text(message_text)
+            page.wait_for_timeout(400)
             page.keyboard.press("Enter")
-            page.wait_for_timeout(1500)  # give it a moment to actually go out
+
+            want = self._norm(message_text)[:30]
+
+            def went_out():
+                n, text = self._wa_last_message(page)
+                return want in self._norm(text) and (n > before_n or text != before_text)
+
+            sent = False
+            for _ in range(14):                    # up to ~7 seconds
+                page.wait_for_timeout(500)
+                if went_out():
+                    sent = True
+                    break
+
+            if not sent:                           # Enter didn't do it: try the send button once
+                btn = page.locator(
+                    "button[aria-label='Send'], div[aria-label='Send'], span[data-icon='send']"
+                ).last
+                if btn.count() > 0:
+                    try:
+                        btn.click(timeout=3000)
+                    except Exception:
+                        pass
+                    for _ in range(8):
+                        page.wait_for_timeout(500)
+                        if went_out():
+                            sent = True
+                            break
+
+            if not sent:
+                try:
+                    page.screenshot(path=WA_SEND_SHOT)
+                except Exception:
+                    pass
+                return (f"WhatsApp: I tried to send that to {opened} but couldn't confirm it went out. "
+                        f"Please check the chat.")
+
+            try:   # wait for the little clock icon to clear so closing the chat can't interrupt delivery
+                page.wait_for_selector("span[data-icon='msg-time']", state="detached", timeout=8000)
+            except PWTimeout:
+                pass
             return f"Successfully sent WhatsApp message to {opened}."
         finally:
             self._reset_wa(page)

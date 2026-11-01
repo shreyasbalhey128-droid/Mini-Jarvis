@@ -14,6 +14,10 @@ from self_healing_agent import SelfHealingAgent
 from messaging_agent import SocialAgent
 social_agent = SocialAgent()
 import jobs
+try:                      # Aegis's heat guard (see heat_guard.py; needs: pip install psutil)
+    import heat_guard
+except ImportError:
+    heat_guard = None
 try:                      # read-only Google Calendar (see the setup notes at the top of calendar_agent.py)
     from calendar_agent import CalendarAgent
 except ImportError:
@@ -2825,6 +2829,7 @@ def handle_time_date(c):
 LAST_CODE = []                                        # code blocks from the most recent answer (Nova)
 DOCS = jobs.DocIndex(os.path.join(BASE, "doc_index"))  # Atlas: your documents, searchable offline
 AEGIS = {"state": {}, "pending": [], "errors": jobs.ErrorLog(os.path.join(BASE, "errors.log"))}
+HEAT = heat_guard.HeatGuard(protected=PROTECTED) if heat_guard else None   # Aegis: overheating watch
 JOURNAL = os.path.join(BASE, "organize_journal.json")
 SCRIPTS_DIR = os.path.join(BASE, "scripts")
 BACKUP_DIR = os.path.join(os.path.expanduser("~"), "Jarvis Backups")
@@ -2883,6 +2888,10 @@ def aegis_tick():
     err = AEGIS["errors"].alert()
     if err:
         AEGIS["pending"].append("Aegis alert. " + err)
+    if HEAT is not None and SET.get("heat_guard", True) and not S["asleep"]:
+        heat = HEAT.check()                            # paces itself: reads the temperature about once a minute
+        if heat:
+            AEGIS["pending"].append("Aegis alert. " + heat["text"])
     while AEGIS["pending"] and _say_first(AEGIS["pending"][0], persona="edith"):
         AEGIS["pending"].pop(0)
     del AEGIS["pending"][:-5]
@@ -3119,6 +3128,34 @@ def web_job(kind, a):
         speak(OFFLINE)
     except ValueError as e:
         speak(f"I can't open that: {e}.")
+
+
+def handle_heat(c):
+    """Aegis's heat guard: 'how hot is my laptop', 'cool down', 'heat guard off' (see heat_guard.py)."""
+    if HEAT is None:
+        return False
+    cmd = heat_guard.match_command(c)
+    if not cmd:
+        return False
+    with as_persona("edith"):
+        if cmd == "status":
+            speak(HEAT.status_text())
+        elif cmd in ("on", "off"):
+            SET["heat_guard"] = cmd == "on"
+            save_settings()
+            speak("Heat guard on. I'll warn you before the laptop overheats." if cmd == "on"
+                  else "Heat guard off. I won't warn you about heat until you turn it back on.")
+        elif not HEAT.has_psutil:
+            speak("I need the psutil package for that. Run pip install psutil.")
+        else:
+            target = HEAT.cool_target()
+            if not target:
+                speak("Nothing is hogging the processor right now. If the laptop is still hot, "
+                      "say go to sleep and I'll cut the load.")
+            else:
+                speak(f"{target['label']} is using about {target['cpu']} percent of the processor.")
+                close_app(target["name"])               # asks you to confirm first, then closes it politely
+    return True
 
 
 def handle_jobs(c):
@@ -3789,7 +3826,7 @@ def _route_impl(command):
         do_vision(src, c)
         return
     if c and (handle_memory_command(c) or handle_system_volume(c) or handle_calendar(c) or handle_time_date(c) 
-              or handle_social_image_command(c) or handle_social_send_command(c) or handle_social_command(c) or handle_jobs(c) or handle_audio(c)
+              or handle_social_image_command(c) or handle_social_send_command(c) or handle_social_command(c) or handle_heat(c) or handle_jobs(c) or handle_audio(c)
               or handle_file_command(c) or handle_action(c)):
             return
     ask(command)

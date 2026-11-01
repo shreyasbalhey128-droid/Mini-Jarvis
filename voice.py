@@ -18,6 +18,22 @@ try:                      # Aegis's heat guard (see heat_guard.py; needs: pip in
     import heat_guard
 except ImportError:
     heat_guard = None
+try:                      # timers, alarms and reminders (see timers_agent.py)
+    import timers_agent
+except ImportError:
+    timers_agent = None
+try:                      # Nova's screen debugger: "what's this error?" (see screen_debug.py)
+    import screen_debug
+except ImportError:
+    screen_debug = None
+try:                      # clipboard actions: "summarize what I copied" (see clipboard_agent.py)
+    import clipboard_agent
+except ImportError:
+    clipboard_agent = None
+try:                      # voice notes and lists: "note that...", "add milk to my shopping list" (see notes_agent.py)
+    import notes_agent
+except ImportError:
+    notes_agent = None
 try:                      # read-only Google Calendar (see the setup notes at the top of calendar_agent.py)
     from calendar_agent import CalendarAgent
 except ImportError:
@@ -2830,6 +2846,10 @@ LAST_CODE = []                                        # code blocks from the mos
 DOCS = jobs.DocIndex(os.path.join(BASE, "doc_index"))  # Atlas: your documents, searchable offline
 AEGIS = {"state": {}, "pending": [], "errors": jobs.ErrorLog(os.path.join(BASE, "errors.log"))}
 HEAT = heat_guard.HeatGuard(protected=PROTECTED) if heat_guard else None   # Aegis: overheating watch
+# timers, alarms and reminders, saved in reminders.json (the lambda is looked up later: timer_fire is defined below)
+TIMERS = (timers_agent.TimerAgent(os.path.join(BASE, "reminders.json"), on_fire=lambda *a: timer_fire(*a))
+          if timers_agent else None)
+NOTES = notes_agent.NotesAgent(os.path.join(BASE, "notes.json")) if notes_agent else None   # notes + lists
 JOURNAL = os.path.join(BASE, "organize_journal.json")
 SCRIPTS_DIR = os.path.join(BASE, "scripts")
 BACKUP_DIR = os.path.join(os.path.expanduser("~"), "Jarvis Backups")
@@ -3128,6 +3148,252 @@ def web_job(kind, a):
         speak(OFFLINE)
     except ValueError as e:
         speak(f"I can't open that: {e}.")
+
+
+def handle_notes(c):
+    """'note that...', 'add milk to my shopping list', 'what's on my to-do list', 'tick off milk' (see notes_agent.py)."""
+    if NOTES is None:
+        return False
+    try:
+        res = NOTES.handle(c)
+    except Exception:
+        traceback.print_exc()
+        return False
+    if res is None:
+        return False
+    for _ in range(3):                                       # it may need an answer or a yes first
+        if res.get("ask"):
+            speak(res["ask"])
+            set_state("listening")
+            got = confirm_input(12)                          # your next words, spoken or typed
+            if not got or not got[0].strip():
+                speak("Okay, never mind.")
+                return True
+            res = res["then"](got[0])
+        elif res.get("confirm"):
+            if not _yes(res["confirm"]):
+                speak("Okay, I left it as it was.")
+                return True
+            res = res["do"]()
+        else:
+            break
+    speak(res.get("say") or "Done.", shown=res.get("show"))
+    return True
+
+
+def handle_clipboard(c):
+    """'summarize / translate / explain / fix the grammar of what I copied', 'copy that' (see clipboard_agent.py)."""
+    if clipboard_agent is None:
+        return False
+    cmd = clipboard_agent.parse(c)
+    if not cmd:
+        return False
+    act = cmd["action"]
+
+    if act == "copy_last":                                   # Jarvis's own last answer or code -> clipboard
+        if cmd["code"]:
+            if not LAST_CODE:
+                speak("I don't have any code to copy yet.")
+                return True
+            text = "\n\n".join(code for _, code in LAST_CODE)
+        else:
+            msgs = ensure_conv().get("messages") or []
+            text = next((m["content"] for m in reversed(msgs) if m.get("role") == "assistant" and m.get("content")), "")
+            if not text:
+                speak("I haven't said anything to copy yet.")
+                return True
+        speak("Copied." if clipboard_agent.set_text(text) else "I couldn't reach the clipboard.")
+        return True
+    if act == "clear":
+        speak("Your clipboard is empty." if clipboard_agent.clear() else "I couldn't reach the clipboard.")
+        return True
+
+    text = clipboard_agent.get_text()
+    if not text:
+        speak("There's no text on your clipboard. Copy something first, then ask me again.")
+        return True
+    if act == "read":
+        spoken, cut = clipboard_agent.preview(text)
+        speak(spoken + (" The rest is on screen." if cut else ""), shown=text)
+        return True
+
+    set_state("thinking")
+    if len(text) > clipboard_agent.MAX_CHARS and act in ("translate", "rewrite", "explain"):
+        speak("That's a long one, so I'll only use the first part.")
+    elif len(text) > 1500 and act != "debug":
+        speak("One moment.")
+    try:
+        if act == "debug":
+            with as_persona("friday"):                       # Nova, same debugger as the screen one
+                if screen_debug is None:
+                    speak(clean_for_speech(clipboard_agent.clean_result(llm_once(
+                        clipboard_agent.build_prompt("explain", text), 200))))
+                    return True
+                reply = llm_code(screen_debug.build_prompt(screen_debug.pick_error_text(text) or text[-2500:], c))
+                spoken, full = screen_debug.parse_answer(reply)
+                conv = ensure_conv()
+                conv["messages"].append({"role": "user", "content": f"{c} (Text I copied: {text[:600]})"})
+                conv["messages"].append({"role": "assistant", "content": full})
+                code = jobs.extract_code(full)
+                if code:
+                    LAST_CODE[:] = code
+                save_convs()
+                speak(spoken, shown=full)
+            return True
+        if act == "summarize":
+            if len(text) > 3500:
+                out = jobs.long_summary(text, llm_once)      # in parts, like the long-file summary
+            else:
+                out = clipboard_agent.clean_result(llm_once(clipboard_agent.build_prompt("summarize", text), 220))
+            speak(out or "I couldn't make a summary of that.")
+        elif act == "explain":
+            out = clipboard_agent.clean_result(llm_once(clipboard_agent.build_prompt("explain", text), 220))
+            speak(out or "I couldn't work out what that is.")
+        elif act == "translate":
+            lang = cmd["lang"]
+            out = clipboard_agent.clean_result(llm_once(clipboard_agent.build_prompt("translate", text, lang=lang), 600))
+            if not out:
+                speak("I couldn't translate that.")
+            else:
+                clipboard_agent.set_text(out)
+                if lang.lower() == "english":                # English can be read out; other languages would sound wrong
+                    spoken, cut = clipboard_agent.preview(out)
+                    speak(spoken + (" The full translation is on screen and on your clipboard." if cut
+                                    else " It's also on your clipboard."), shown=out)
+                else:
+                    speak(f"Translated to {lang}. It's on screen and on your clipboard.", shown=out)
+        elif act == "rewrite":
+            out = clipboard_agent.clean_result(llm_once(
+                clipboard_agent.build_prompt("rewrite", text, style=cmd["style"]), 700))
+            if not out:
+                speak("I couldn't rewrite that.")
+            else:
+                clipboard_agent.set_text(out)
+                speak("Done. It's on your clipboard, so just paste it.", shown=out)
+    except Exception as e:
+        traceback.print_exc()
+        ui.log_line("sys", f"Could not reach the model: {e}")
+        speak("Sorry, I could not reach the model.")
+    return True
+
+
+DEBUG_INTROS = ["Let me read that error.", "Okay, checking the error on your screen.", "One sec, reading it."]
+
+
+def llm_code(prompt, tokens=450):
+    """One question to the code model (settings.json "code_model", else the everyday model).
+    NOT added to your conversation by itself."""
+    model = SET.get("code_model") or SET["model"]
+    r = requests.post(f"{URL}/api/chat", json={"model": model, "stream": False, "keep_alive": "5m",
+                      "messages": [{"role": "user", "content": prompt}],
+                      "options": {"num_ctx": 4096, "num_predict": tokens, "temperature": 0.2}}, timeout=300)
+    return (r.json().get("message", {}).get("content") or "").strip()
+
+
+def handle_screen_debug(c):
+    """Nova's screen debugger: 'what's this error', 'debug this', 'fix this error' (see screen_debug.py).
+    Screenshot -> OCR -> the AI explains the error. Falls back to the vision model if no text can be read."""
+    if screen_debug is None or not screen_debug.is_debug_request(c):
+        return False
+    with as_persona("friday"):                                   # Nova's name above the answer
+        speak(random.choice(DEBUG_INTROS))
+        set_state("thinking")
+        try:
+            img = ui.grab_screen()
+        except Exception as e:
+            speak(str(e))
+            return True
+        ui.show_vision(img, "SCREEN CAPTURE")
+        try:
+            ocr = vision.extract_text(img) or ""
+        except Exception:
+            traceback.print_exc()
+            ocr = ""
+        text = screen_debug.pick_error_text(ocr)
+        if len(text.strip()) < 15:                               # nothing readable: let the vision model try
+            ui.end_vision(2)
+            do_vision("screen", "read the error message on this screen and explain what it means and how to fix it")
+            return True
+        ui.log_line("sys", f"[debug] read {len(ocr)} characters from the screen"
+                           + ("" if screen_debug.has_error_lines(ocr) else " (no obvious error line, using the end of the text)"))
+        try:
+            reply = llm_code(screen_debug.build_prompt(text, c))
+        except Exception as e:
+            ui.end_vision(2)
+            ui.log_line("sys", f"Could not reach the model: {e}")
+            speak("Sorry, I could not reach the model.")
+            return True
+        ui.end_vision(4)
+        if not reply:
+            speak("I couldn't make sense of it. Try again with the error fully on screen.")
+            return True
+        spoken, full = screen_debug.parse_answer(reply)
+        conv = ensure_conv()                                     # so "how do I fix that line?" has context
+        conv["messages"].append({"role": "user", "content": f"{c} (Error text read from my screen: {text[:600]})"})
+        conv["messages"].append({"role": "assistant", "content": full})
+        code = jobs.extract_code(full)
+        if code:
+            LAST_CODE[:] = code                                  # "save that code" saves this
+        save_convs()
+        speak(spoken, shown=full)
+    return True
+
+
+def _beeps():
+    """Three beeps, so a timer or alarm is still heard while Jarvis is asleep or muted (Windows only)."""
+    try:
+        import winsound
+        for _ in range(3):
+            winsound.Beep(1000, 250)
+            time.sleep(0.12)
+    except Exception:
+        pass
+
+
+def timer_fire(item, late, ring_no):
+    """Called by the timer thread when something is due. Returns True once it was delivered
+    (False = he is busy right now, so it is tried again in a few seconds)."""
+    kind = item["kind"]
+    name = item.get("name") or (timers_agent.timer_name(item.get("secs", 0)) if timers_agent else "")
+    if kind == "timer":
+        if ring_no == 0:
+            text = f"Your {name} timer is done."
+        elif ring_no == 1:
+            text = f"Your {name} timer is still going. Say Echo, snooze, or Echo, stop the timer."
+        else:
+            text = f"Your {name} timer is still going."
+    elif kind == "alarm":
+        if ring_no == 0:
+            text = f"It's {time_phrase()}. Your alarm is going off."
+        else:
+            text = "Your alarm is still ringing. Say Echo, snooze, or Echo, stop the alarm."
+    else:
+        what = item.get("text") or ""
+        text = f"Reminder: {what}." if what else "You asked me to remind you about something."
+    if late and ring_no == 0:
+        text = "Sorry, I missed this while I was off. " + text
+    ok = _say_first(text, persona="jarvis")                 # Echo, whoever is active
+    if ok and kind != "reminder" and (S["asleep"] or SET["muted"]):
+        threading.Thread(target=_beeps, daemon=True).start()
+    return ok
+
+
+def handle_timers(c):
+    """'set a timer for 10 minutes', 'set an alarm for 7 am', 'remind me to call mom in 20 minutes',
+    'what timers do I have', 'cancel the timer', 'snooze' (see timers_agent.py)."""
+    if TIMERS is None:
+        return False
+    try:
+        reply = TIMERS.handle(c)
+    except Exception:
+        traceback.print_exc()
+        return False
+    if reply is None:
+        return False
+    if reply.startswith("You have") and "don't" not in reply:
+        ui.log_line("sys", TIMERS.summary())              # the full list stays on screen
+    speak(reply)
+    return True
 
 
 def handle_heat(c):
@@ -3821,11 +4087,15 @@ def _route_impl(command):
         return
     if c and handle_dropped_followup(c):
         return
+    if c and handle_clipboard(c):
+        return
+    if c and handle_screen_debug(c):
+        return
     src = vision_request(c) if c else None
     if src:
         do_vision(src, c)
         return
-    if c and (handle_memory_command(c) or handle_system_volume(c) or handle_calendar(c) or handle_time_date(c) 
+    if c and (handle_memory_command(c) or handle_timers(c) or handle_notes(c) or handle_system_volume(c) or handle_calendar(c) or handle_time_date(c) 
               or handle_social_image_command(c) or handle_social_send_command(c) or handle_social_command(c) or handle_heat(c) or handle_jobs(c) or handle_audio(c)
               or handle_file_command(c) or handle_action(c)):
             return
@@ -4083,6 +4353,8 @@ def jarvis_loop():
         threading.Thread(target=aegis_loop, daemon=True).start()
         if calendar_agent is not None:
             calendar_agent.start()                  # background sync (every 15 min) + 10-minute reminders
+        if TIMERS is not None:
+            TIMERS.start()                          # timers, alarms and reminders (saved in reminders.json)
 
         speak(f"{P()['name']} online and ready.")
 

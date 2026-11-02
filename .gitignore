@@ -17,6 +17,8 @@ conversations.json
 memory.json
 settings.json
 state.json
+reminders.json
+routines.json
 errors.log
 *.log
 chroma_db/

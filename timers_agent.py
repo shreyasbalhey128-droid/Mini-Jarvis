@@ -336,15 +336,33 @@ class TimerAgent:
         except Exception:
             pass
 
-    def _add(self, kind, due, text="", name="", secs=0):
+    def _add(self, kind, due, text="", name="", secs=0, routine=""):
         with self._lock:
             item = {"id": int(time.time() * 1000), "kind": kind, "due": due, "text": text, "name": name,
                     "secs": secs, "created": time.time(), "rings": 0}
+            if routine:
+                item["routine"] = routine
             self.items.append(item)
             self.items.sort(key=lambda i: i["due"])
             self._save()
         self._wake.set()
         return item
+
+    def add_timer(self, secs, name="", routine=""):
+        """Starts a timer from code (routines use this). A routine's earlier timer of the same name is replaced."""
+        if routine:
+            self.cancel_routine(routine)
+        return self._add("timer", time.time() + secs, name=name, secs=secs, routine=routine)
+
+    def cancel_routine(self, routine):
+        """Removes the timers a routine started. Returns how many."""
+        with self._lock:
+            gone = [i for i in self.items if i.get("routine") == routine]
+            for i in gone:
+                self.items.remove(i)
+            if gone:
+                self._save()
+        return len(gone)
 
     # ----- the clock thread -----
     def start(self):

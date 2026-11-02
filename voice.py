@@ -34,6 +34,18 @@ try:                      # voice notes and lists: "note that...", "add milk to 
     import notes_agent
 except ImportError:
     notes_agent = None
+try:                      # routines: "study mode" (see routines_agent.py; edit routines.json to make your own)
+    import routines_agent
+except ImportError:
+    routines_agent = None
+try:                      # habit tracking: "I worked out", "what's my streak" (see habits_agent.py)
+    import habits_agent
+except ImportError:
+    habits_agent = None
+try:                      # ask questions about ONE document (see docqa_agent.py)
+    import docqa_agent
+except ImportError:
+    docqa_agent = None
 try:                      # read-only Google Calendar (see the setup notes at the top of calendar_agent.py)
     from calendar_agent import CalendarAgent
 except ImportError:
@@ -1083,7 +1095,7 @@ def handle_dropped_file(path):
     else:
         S["dropped_file"], S["dropped_file_t"] = path, time.time()
         S["last_file_matches"] = [path]
-        speak(f"Got {name}. Say summarize it, or read it.")
+        speak(f"Got {name}. Say summarize it, read it, or ask questions about it.")
 
 
 def handle_dropped_followup(c):
@@ -2850,6 +2862,11 @@ HEAT = heat_guard.HeatGuard(protected=PROTECTED) if heat_guard else None   # Aeg
 TIMERS = (timers_agent.TimerAgent(os.path.join(BASE, "reminders.json"), on_fire=lambda *a: timer_fire(*a))
           if timers_agent else None)
 NOTES = notes_agent.NotesAgent(os.path.join(BASE, "notes.json")) if notes_agent else None   # notes + lists
+ROUTINES = routines_agent.Routines(os.path.join(BASE, "routines.json")) if routines_agent else None   # "study mode"
+HABITS = habits_agent.Habits(os.path.join(BASE, "habits.json")) if habits_agent else None   # habit check-ins + streaks
+DOC = {"s": None}                                                                           # the document you're asking about
+if ROUTINES is not None and ROUTINES.load_error:
+    print("Routines:", ROUTINES.load_error)
 JOURNAL = os.path.join(BASE, "organize_journal.json")
 SCRIPTS_DIR = os.path.join(BASE, "scripts")
 BACKUP_DIR = os.path.join(os.path.expanduser("~"), "Jarvis Backups")
@@ -3148,6 +3165,263 @@ def web_job(kind, a):
         speak(OFFLINE)
     except ValueError as e:
         speak(f"I can't open that: {e}.")
+
+
+def _join_words(items):
+    items = [str(i) for i in items]
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1] if items else ""
+
+
+def _proc_for(app):
+    n = re.sub(r"[^a-z0-9 ]", "", str(app).strip().lower())
+    return CLOSE_ALIASES.get(n, n.replace(" ", ""))
+
+
+def _running_windows(procs):
+    """Which of these apps have a window open right now (a list of the names you passed in)."""
+    procs = [re.sub(r"[^A-Za-z0-9_.-]", "", p) for p in procs]
+    procs = [p for p in procs if p]
+    if not procs:
+        return []
+    ps = ("$n=@(" + ",".join(f"'{p}'" for p in procs) + "); foreach($x in $n){ "
+          "if (Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.ProcessName -like ('*'+$x+'*') }) { $x } }")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
+                             timeout=25, creationflags=0x08000000).stdout
+    except Exception:
+        return []
+    return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+
+def _quiet_close(proc):
+    """The polite close (like clicking X) without speaking. Never touches the PROTECTED apps."""
+    ps = ("$protected = @(" + ",".join(f"'{p}'" for p in PROTECTED) + "); "
+          "$n = '" + re.sub(r"[^A-Za-z0-9_.-]", "", proc) + "'; "
+          "Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.ProcessName -like ('*' + $n + '*') -and "
+          "($protected -notcontains $_.ProcessName) } | ForEach-Object { [void]$_.CloseMainWindow() }")
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=20,
+                       creationflags=0x08000000)
+    except Exception:
+        pass
+
+
+def run_routine(name):
+    """Does what a routine says: closes (after one yes), opens, sites, timer, volume (see routines_agent.py)."""
+    r = ROUTINES.get(name)
+    steps = r["steps"]
+    speak(r["say"] or f"{name.capitalize()} mode on.")
+    done, missing = [], []
+    protected = {p.lower() for p in PROTECTED}
+
+    wanted = {}                                              # --- close (one yes for all of them) ---
+    for st in steps:
+        for app in st.get("close") or []:
+            proc = _proc_for(app)
+            if proc and proc.lower() not in protected:
+                wanted[proc] = str(app)
+    running = _running_windows(list(wanted))
+    if running:
+        names = [wanted.get(p, p) for p in running]
+        if _yes(f"{name.capitalize()} mode wants to close {_join_words(names)}. Close {'it' if len(names) == 1 else 'them'}?"):
+            for p in running:
+                _quiet_close(p)
+            done.append("closed " + _join_words(names))
+        else:
+            done.append("left " + _join_words(names) + " open")
+
+    to_open = [str(a) for st in steps for a in (st.get("open") or [])]   # --- open (skips what is already open) ---
+    already = {p.lower() for p in _running_windows([_proc_for(a) for a in to_open])}
+    opened = []
+    for app in to_open:
+        if _proc_for(app).lower() in already:
+            continue
+        found = resolve_app(app.lower())
+        if found:
+            launch(found[1], found[2])
+            opened.append(found[0])
+        else:
+            missing.append(app)
+    if opened:
+        done.append("opened " + _join_words(opened))
+
+    for st in steps:                                         # --- websites ---
+        for site in st.get("site") or []:
+            url = SITES.get(str(site).lower(), str(site))
+            open_url(url if url.startswith(("http://", "https://")) else "https://" + url)
+            done.append("opened " + re.sub(r"^https?://(?:www\.)?", "", url).split("/")[0])
+
+    for st in steps:                                         # --- timer, volume ---
+        t = st.get("timer")
+        if isinstance(t, dict) and t.get("minutes") and TIMERS is not None:
+            mins = float(t["minutes"])
+            TIMERS.add_timer(int(mins * 60), str(t.get("name") or ""), routine=name)
+            done.append(f"started a {mins:g} minute {t.get('name') or ''} timer".replace("  ", " "))
+        if isinstance(st.get("volume"), (int, float)) and system_volume.available:
+            system_volume.set(int(st["volume"]))
+            done.append(f"set the volume to {int(st['volume'])} percent")
+
+    ROUTINES.active = name
+    ui.log_line("sys", f"[{name}] " + ("; ".join(done) if done else "nothing to do"))
+    text = ("Done. " + _join_words(done).capitalize() + ".") if done else "Done."
+    if missing:
+        text += f" I couldn't find {_join_words(missing)}."
+    speak(text)
+
+
+def handle_routines(c):
+    """'study mode', 'take a break', 'end study mode', 'what routines do I have' (see routines_agent.py)."""
+    if ROUTINES is None:
+        return False
+    m = ROUTINES.match(c)
+    if not m:
+        return False
+    act, name = m["action"], m.get("name")
+    if act == "list":
+        names = ROUTINES.names()
+        speak("You have " + str(len(names)) + " routine" + ("s" if len(names) != 1 else "") + ": " + _join_words(names) + "."
+              if names else "You don't have any routines.")
+    elif act == "describe":
+        speak(ROUTINES.describe(name))
+    elif act == "run":
+        run_routine(name)
+    elif act == "end":
+        cancelled = TIMERS.cancel_routine(name) if TIMERS is not None else 0
+        if ROUTINES.active == name:
+            ROUTINES.active = None
+        r = ROUTINES.get(name) or {}
+        speak((r.get("end_say") or f"{name.capitalize()} mode off.") + (" I cancelled its timer." if cancelled else ""))
+    return True
+
+
+def _speak_result(res):
+    """Speaks a {'say','show'} result, or asks first for a {'confirm','do'} one (habits use this)."""
+    for _ in range(3):
+        if res.get("confirm"):
+            if not _yes(res["confirm"]):
+                speak("Okay, I left it as it was.")
+                return
+            res = res["do"]()
+        else:
+            break
+    speak(res.get("say") or "Done.", shown=res.get("show"))
+
+
+def handle_habits(c):
+    """'I worked out', 'what's my streak', 'weekly habit summary', 'start tracking meditation' (see habits_agent.py)."""
+    if HABITS is None:
+        return False
+    try:
+        res = HABITS.handle(c)
+    except Exception:
+        traceback.print_exc()
+        return False
+    if res is None:
+        return False
+    _speak_result(res)
+    return True
+
+
+def _doc_path(target):
+    """The file for 'it' / 'this document' (what you dropped, or what we are on) or a name like 'my resume'."""
+    t = target.strip()
+    if t == "this" or docqa_agent.is_this(t):
+        f = S.get("dropped_file")
+        if f and os.path.isfile(f) and time.time() - S.get("dropped_file_t", 0) < 3600:
+            return f
+        return DOC["s"].path if DOC["s"] else None
+    name = re.sub(r"\b(?:pdf|document|doc|file)\b", " ", t)
+    name = " ".join(re.sub(r"^(?:my|the|this|that)\s+", "", name.strip()).split())
+    return _find_file(name) if name else None
+
+
+def open_doc(path):
+    """Reads the document (and prepares it when it is long). Returns the session, or None if it can't be read."""
+    name = os.path.basename(path)
+    sess = docqa_agent.DocSession(name, path)
+    set_state("thinking")
+    if not sess.load(file_agent.read_full):
+        speak(f"I couldn't read any text in {name}. If it's a scanned PDF, it's only pictures, so I can't read it yet.")
+        return None
+    if not sess.whole:
+        speak(f"{name} is a long one, so I'll go through it first. One moment.")
+        sess.prepare(embed)                                  # keyword matching is the fallback if this model is missing
+    DOC["s"] = sess
+    return sess
+
+
+def doc_answer(sess, q):
+    set_state("thinking")
+    if docqa_agent.is_summary_question(q):
+        speak(file_agent.summarize_file(sess.path))
+        sess.remember(q, "(I summarized the document.)")
+        return
+    try:
+        ans = llm_once(docqa_agent.build_prompt(sess.name, q, sess.excerpts(q, embed), sess.hist), 260)
+    except Exception as e:
+        traceback.print_exc()
+        ui.log_line("sys", f"Could not reach the model: {e}")
+        speak("Sorry, I could not reach the model.")
+        return
+    ans = " ".join((ans or "").split()) or "I can't find that in the document."
+    sess.remember(q, ans)
+    speak(ans)
+
+
+def handle_docqa_control(c):
+    """'ask questions about it', 'what does my resume say about python', 'stop document mode' (see docqa_agent.py)."""
+    if docqa_agent is None:
+        return False
+    try:
+        indexed = list(DOCS.sources())
+    except Exception:
+        indexed = []
+    m = docqa_agent.match_control(c, indexed=indexed)
+    if not m:
+        return False
+    act = m["action"]
+    if act == "exit":
+        if not DOC["s"]:
+            return False
+        DOC["s"] = None
+        speak("Okay, document mode is off.")
+    elif act == "list":
+        if not indexed:
+            speak("I haven't indexed any documents yet. Say index my documents first.")
+        else:
+            ui.log_line("sys", "Indexed documents:\n" + "\n".join(f"- {n}" for n in indexed))
+            speak(f"I've indexed {len(indexed)} document{'s' if len(indexed) != 1 else ''}: "
+                  + ", ".join(indexed[:6]) + (" and more. The full list is on screen." if len(indexed) > 6 else "."))
+    else:                                                    # enter / scoped
+        path = _doc_path(m["target"])
+        if not path:
+            if act == "scoped":
+                return False                                 # not a document we can find: let the normal chat handle it
+            speak("I couldn't find that file. Drop it on my window, or tell me its name." if m["target"] not in ("this",) and not docqa_agent.is_this(m["target"])
+                  else "Drop a file on my window first, or tell me its name.")
+            return True
+        sess = DOC["s"] if (DOC["s"] and DOC["s"].path == path and DOC["s"].active) else open_doc(path)
+        if sess is None:
+            return True
+        if act == "enter":
+            speak(f"Okay, ask me anything about {sess.name}. Say stop document mode when you're done.")
+        else:
+            doc_answer(sess, m["question"])
+    return True
+
+
+def handle_docqa_question(c):
+    """While a document is open, your questions are answered from it (last in the chain, so real commands win)."""
+    s = DOC["s"]
+    if not s:
+        return False
+    if not s.active:
+        DOC["s"] = None
+        return False
+    if not docqa_agent.looks_like_question(c):
+        return False
+    doc_answer(s, c)
+    return True
 
 
 def handle_notes(c):
@@ -4095,9 +4369,9 @@ def _route_impl(command):
     if src:
         do_vision(src, c)
         return
-    if c and (handle_memory_command(c) or handle_timers(c) or handle_notes(c) or handle_system_volume(c) or handle_calendar(c) or handle_time_date(c) 
+    if c and (handle_memory_command(c) or handle_timers(c) or handle_notes(c) or handle_routines(c) or handle_habits(c) or handle_docqa_control(c) or handle_system_volume(c) or handle_calendar(c) or handle_time_date(c) 
               or handle_social_image_command(c) or handle_social_send_command(c) or handle_social_command(c) or handle_heat(c) or handle_jobs(c) or handle_audio(c)
-              or handle_file_command(c) or handle_action(c)):
+              or handle_file_command(c) or handle_action(c) or handle_docqa_question(c)):
             return
     ask(command)
 

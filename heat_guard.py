@@ -29,7 +29,8 @@ from collections import deque
 
 try:
     import psutil  # pyright: ignore[reportMissingModuleSource]
-except ImportError:
+except Exception as e:
+    print(f"[HeatGuard] psutil import failed: {e}")
     psutil = None
 
 # ---------------- settings (change these to taste) ----------------

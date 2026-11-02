@@ -14,6 +14,10 @@ from self_healing_agent import SelfHealingAgent
 from messaging_agent import SocialAgent
 social_agent = SocialAgent()
 import jobs
+try:                      # short transition music pieces (see music.py)
+    import music
+except ImportError:
+    music = None
 try:                      # Aegis's heat guard (see heat_guard.py; needs: pip install psutil)
     import heat_guard
 except ImportError:
@@ -46,6 +50,10 @@ try:                      # ask questions about ONE document (see docqa_agent.py
     import docqa_agent
 except ImportError:
     docqa_agent = None
+try:                      # Lightroom-style edit suggestions for a photo (see photo_helper.py)
+    import photo_helper
+except ImportError:
+    photo_helper = None
 try:                      # read-only Google Calendar (see the setup notes at the top of calendar_agent.py)
     from calendar_agent import CalendarAgent
 except ImportError:
@@ -511,6 +519,25 @@ def set_voice(muted=None, volume=None, from_ui=False):
     save_settings()
     if not from_ui:
         ui.set_voice(SET["muted"], SET["volume"])
+
+
+def play_transition(name):
+    """Plays the synthesized transition music for a persona, sleep, or wake event."""
+    if SET["muted"] or music is None:
+        return
+    pair = music.transition(name)
+    if pair:
+        arr, sr = pair
+        set_state("speaking")
+        ears.begin_barge()
+        try:
+            play_sound(arr, sr)
+        except Exception:
+            traceback.print_exc()
+        finally:
+            ears.end_barge()
+        ui.level = 0.0
+        set_state("listening")
 
 
 text_q = queue.Queue()
@@ -1134,10 +1161,9 @@ def install_drop_target():
         except Exception as e:
             ui.log_line("sys", f"Drag & drop unavailable: {e}")
     try:
-        ui.root.after(800, hook)                  # runs on the window's own thread once it exists
+        ui.root.after(1500, hook)  # Increased from 800 to 1500ms to give it more time to map
     except Exception:
         pass
-
 
 def _social_bg(label, fn, *args, **kw):
     """Runs a slow browser job in the background, then says the result once it is his turn to talk."""
@@ -2427,7 +2453,8 @@ def go_to_sleep(announce=True):
     if S["asleep"]:
         return
     if announce:
-        speak(SLEEP_LINES.get(cur_key, ("Going to sleep.", ""))[0])
+        play_transition("sleep")
+    speak(SLEEP_LINES.get(cur_key, ("Going to sleep.", ""))[0])
     S["asleep"] = True
     ui.set_sleep(True)
     ui.log_line("sys", 'Sleep mode: models unloaded, animation slowed. '
@@ -2467,6 +2494,7 @@ def wake_up(announce=True):
     threading.Thread(target=start_message_alerts, daemon=True).start()
     S["last"] = time.time()
     if announce:
+        play_transition("wake")
         speak(woke_line())
     set_state("listening" if S["awake"] else "sleep")
 
@@ -2586,6 +2614,7 @@ def switch_persona(key, quiet=False):
     if key == "ultron":
         ultron_takeover(old_key)
     else:
+        play_transition(key)  # Play incoming persona's theme music
         speak(old["handoff"].format(new=new["name"]))
     loader.join()
     cur_key = key
@@ -3291,6 +3320,42 @@ def handle_routines(c):
             ROUTINES.active = None
         r = ROUTINES.get(name) or {}
         speak((r.get("end_say") or f"{name.capitalize()} mode off.") + (" I cancelled its timer." if cancelled else ""))
+    return True
+
+
+def handle_photo_help(c):
+    """'how should I edit this photo', 'is this picture sharp', 'edit suggestions for my latest photo' (see photo_helper.py)."""
+    if photo_helper is None:
+        return False
+    m = photo_helper.match(c)
+    if not m:
+        return False
+    which, note = m["which"], ""
+    if which == "named":
+        path = _find_image_by_name(m["name"])
+    elif which == "latest":
+        path = _latest_image()
+    else:                                                    # "this photo": the one you just dropped, else your newest photo
+        path = _recent_dropped_image()
+        if not path:
+            path = _latest_image()
+            note = "I don't see a photo you dropped, so I'm using your latest one. "
+    if not path:
+        speak("I couldn't find a photo. Drop one on my window, or say how should I edit my latest photo.")
+        return True
+    set_state("thinking")
+    try:
+        a = photo_helper.analyze(path)
+    except ValueError:
+        speak(photo_helper.EXPORT_HINT)
+        return True
+    spoken, full = photo_helper.report(a)
+    try:
+        ui.show_vision(_load_dropped_image(path), "PHOTO CHECK")
+        ui.end_vision(10)
+    except Exception:
+        pass
+    speak(note + spoken, shown=os.path.basename(path) + "\n" + full)
     return True
 
 
@@ -4358,6 +4423,8 @@ def _route_impl(command):
         ask(thought_prompt(), tokens=300)
         return
     if ultron_defy(c, command):
+        return
+    if c and handle_photo_help(c):                           # before the picture follow-ups: "what's wrong with this photo"
         return
     if c and handle_dropped_followup(c):
         return

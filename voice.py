@@ -14,10 +14,6 @@ from self_healing_agent import SelfHealingAgent
 from messaging_agent import SocialAgent
 social_agent = SocialAgent()
 import jobs
-try:                      # short transition music pieces (see music.py)
-    import music
-except ImportError:
-    music = None
 try:                      # Aegis's heat guard (see heat_guard.py; needs: pip install psutil)
     import heat_guard
 except ImportError:
@@ -521,25 +517,6 @@ def set_voice(muted=None, volume=None, from_ui=False):
         ui.set_voice(SET["muted"], SET["volume"])
 
 
-def play_transition(name):
-    """Plays the synthesized transition music for a persona, sleep, or wake event."""
-    if SET["muted"] or music is None:
-        return
-    pair = music.transition(name)
-    if pair:
-        arr, sr = pair
-        set_state("speaking")
-        ears.begin_barge()
-        try:
-            play_sound(arr, sr)
-        except Exception:
-            traceback.print_exc()
-        finally:
-            ears.end_barge()
-        ui.level = 0.0
-        set_state("listening")
-
-
 text_q = queue.Queue()
 ui.on_text = text_q.put
 ui.on_mute = lambda m: set_voice(muted=m, from_ui=True)
@@ -556,6 +533,8 @@ ui.on_vision = lambda k: text_q.put("\x00vision:" + k)
 ui.on_mic_mute = lambda m: set_mic_muted(m)         # MIC button and Ctrl+Alt+M
 ui.set_voice(SET["muted"], SET["volume"])
 ui.set_persona(cur_key)
+getattr(ui, "set_mood", lambda on: None)(SET.get("mood_colors", True))   # reactor colour follows time of day / CPU load
+                                                                        # (needs the newer jarvis_ui.py + ui_effects.py)
 
 
 def headphones():
@@ -1145,25 +1124,58 @@ def handle_dropped_followup(c):
     return False
 
 
+def _allow_drops(hwnd):
+    """Tells Windows to let drag & drop messages through to this window even when Jarvis runs as administrator
+    (otherwise Windows silently blocks drops from File Explorer, which runs un-elevated)."""
+    try:
+        user32 = ctypes.windll.user32
+        for h in {int(hwnd), int(user32.GetAncestor(hwnd, 2))}:            # the inner window and the real top-level
+            for msg in (0x233, 0x49, 0x4A):                                # WM_DROPFILES, WM_COPYGLOBALDATA, WM_COPYDATA
+                user32.ChangeWindowMessageFilterEx(h, msg, 1, None)        # MSGFLT_ALLOW
+    except Exception:
+        pass
+
+
 def install_drop_target():
-    """Lets you drag files onto the Jarvis window (needs: pip install windnd)."""
+    """Lets you drag files onto the Jarvis window and onto the floating orb (needs: pip install windnd)."""
     def hook():
         try:
             windnd = __import__("windnd")
+        except ImportError as e:
+            msg = (f"Drag & drop: this Python could not import windnd ({e}). Jarvis is running on {sys.executable} - "
+                   f"install it for THAT Python:  \"{sys.executable}\" -m pip install windnd")
+            print("[drop]", msg)
+            ui.log_line("sys", msg)
+            return
 
-            def dropped(files):
-                for f in list(files)[:4]:
-                    text_q.put("\x00drop:" + (f.decode("utf-8", "ignore") if isinstance(f, bytes) else str(f)))
+        def dropped(files):
+            print("[drop] received:", files)
+            for f in list(files)[:4]:
+                text_q.put("\x00drop:" + (f.decode("utf-8", "ignore") if isinstance(f, bytes) else str(f)))
 
-            windnd.hook_dropfiles(ui.root, func=dropped, force_unicode=True)
-        except ImportError:
-            ui.log_line("sys", "Drag & drop needs one install:  pip install windnd")
-        except Exception as e:
-            ui.log_line("sys", f"Drag & drop unavailable: {e}")
+        hooked = []
+        for name, win in (("window", ui.root), ("orb", getattr(ui, "orb", None))):
+            if win is None:
+                continue
+            try:
+                win.update_idletasks()
+                _allow_drops(win.winfo_id())
+                windnd.hook_dropfiles(win, func=dropped, force_unicode=True)
+                hooked.append(name)
+            except Exception as e:
+                print(f"[drop] could not attach to the {name}: {e}")
+        try:
+            admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            admin = False
+        print(f"[drop] ready on: {', '.join(hooked) or 'nothing'} (running as administrator: {admin}; python: {sys.executable})")
+        if not hooked:
+            ui.log_line("sys", "Drag & drop unavailable: could not attach to the window (see the console).")
     try:
-        ui.root.after(1500, hook)  # Increased from 800 to 1500ms to give it more time to map
+        ui.root.after(800, hook)                  # runs on the window's own thread once it exists
     except Exception:
         pass
+
 
 def _social_bg(label, fn, *args, **kw):
     """Runs a slow browser job in the background, then says the result once it is his turn to talk."""
@@ -2065,7 +2077,32 @@ class Speaker:
             raise sd.CallbackStop
 
 
+_DIRECTION_WORDS = re.compile(
+    r"\b(voice|tone|growl\w*|whisper\w*|laugh\w*|chuckl\w*|sigh\w*|smirk\w*|pause\w*|menac\w*|snarl\w*|hiss\w*|"
+    r"mutter\w*|murmur\w*|grin\w*|smil\w*|nod\w*|glitch\w*|static|distort\w*|exhal\w*|clears? (?:his |its )?throat|"
+    r"sinister\w*|ominous\w*|theatrical\w*|dramatic\w*|coldly|darkly|softly|slowly|quietly|bows?|beat|silence)\b", re.I)
+
+
+def strip_stage_directions(t):
+    """Removes things the AI writes as acting notes, like (in a low growl voice), [laughs darkly] or *sighs*,
+    so they are neither spoken nor shown. Normal brackets such as (for example) stay."""
+    if not t:
+        return t
+
+    def drop(m):
+        inner = m.group(1).strip()
+        if 0 < len(inner.split()) <= 8 and not re.search(r"\d|e\.g|for example", inner, re.I) \
+                and _DIRECTION_WORDS.search(inner):
+            return " "
+        return m.group(0)
+    t = re.sub(r"\(([^()\n]{1,80})\)", drop, t)
+    t = re.sub(r"\[([^\[\]\n]{1,80})\]", drop, t)
+    t = re.sub(r"\*([^*\n]{1,80})\*", drop, t)               # *laughs darkly*; a lone *emphasised* word stays
+    return re.sub(r"[ \t]{2,}", " ", t).strip()
+
+
 def clean_for_speech(t):
+    t = strip_stage_directions(t)
     t = re.sub(r"```.*?```", " ", t, flags=re.S)
     t = re.sub(r"https?://\S+", " link ", t)
     t = re.sub(r"(?<=\d)\s?%", " percent", t)
@@ -2108,6 +2145,11 @@ def speak_piper(text, t, glitch=0.0):
         spk.start()
 
     def producer():
+        # On a slow or hot CPU the voice can be made slower than it is played, which is what makes speech stop
+        # between sentences. So when the first sentence shows the voice is slower than real time, it gets a head
+        # start: just enough buffered audio that playback never catches up. If the CPU is fast, it plays at once.
+        buf, started, produced, t0 = [], False, 0.0, time.time()
+        total_est = max(1.0, len(text) / 14.0)             # roughly how many seconds of speech this will be
         try:
             for s in sents:
                 if spk.stopped:
@@ -2120,11 +2162,26 @@ def speak_piper(text, t, glitch=0.0):
                 if glitch > 0 and len(a):                  # Ultron is taking over: the voice breaks up
                     a = glitch_audio(a, t.sr, glitch)
                 if len(a):
-                    spk.feed(a)
-                    spk.feed(np.zeros(int(t.sr * (0.25 if fx else (0.18 if polish else 0.12))), np.int16))
+                    gap = np.zeros(int(t.sr * (0.25 if fx else (0.18 if polish else 0.12))), np.int16)
+                    if started:
+                        spk.feed(a)
+                        spk.feed(gap)
+                    else:
+                        buf += [a, gap]
+                        produced += (len(a) + len(gap)) / t.sr
+                        rtf = (time.time() - t0) / max(produced, 0.2)          # >1 means slower than real time
+                        frac = 0.0 if rtf <= 1.0 else (1.0 - 1.0 / rtf) / (2.0 - 1.0 / rtf)
+                        if len(buf) == 2:
+                            print(f"[voice] making speech at {1 / max(rtf, 0.01):.1f}x real time (above 1.0 is smooth)")
+                        if produced >= min(total_est * frac * 1.2, 25.0):
+                            for chunk in buf:
+                                spk.feed(chunk)
+                            buf, started = [], True
         except Exception:
             traceback.print_exc()
         finally:
+            for chunk in buf:                              # a short answer: nothing was held back for long
+                spk.feed(chunk)
             spk.done_feeding()
 
     threading.Thread(target=producer, daemon=True).start()
@@ -2172,8 +2229,8 @@ def addr(text):
 def speak(text, log=True, glitch=0.0, shown=None):
     """Speaks in the current persona's voice. Returns True if the user interrupted.
     glitch 0..1 makes the voice (and optionally the shown text) break up."""
-    text = addr(text)
-    shown = addr(shown) if shown else shown
+    text = strip_stage_directions(addr(text))
+    shown = strip_stage_directions(addr(shown)) if shown else shown
     if log:
         emit("ai", shown or text)
     if SET["muted"]:
@@ -2453,8 +2510,7 @@ def go_to_sleep(announce=True):
     if S["asleep"]:
         return
     if announce:
-        play_transition("sleep")
-    speak(SLEEP_LINES.get(cur_key, ("Going to sleep.", ""))[0])
+        speak(SLEEP_LINES.get(cur_key, ("Going to sleep.", ""))[0])
     S["asleep"] = True
     ui.set_sleep(True)
     ui.log_line("sys", 'Sleep mode: models unloaded, animation slowed. '
@@ -2494,7 +2550,6 @@ def wake_up(announce=True):
     threading.Thread(target=start_message_alerts, daemon=True).start()
     S["last"] = time.time()
     if announce:
-        play_transition("wake")
         speak(woke_line())
     set_state("listening" if S["awake"] else "sleep")
 
@@ -2614,7 +2669,6 @@ def switch_persona(key, quiet=False):
     if key == "ultron":
         ultron_takeover(old_key)
     else:
-        play_transition(key)  # Play incoming persona's theme music
         speak(old["handoff"].format(new=new["name"]))
     loader.join()
     cur_key = key
@@ -3323,6 +3377,114 @@ def handle_routines(c):
     return True
 
 
+# ================= SILO SURPRISES (easter egg) + MOOD COLOURS =================
+# Now and then Silo breaks into whoever is talking for one line: the picture glitches, he speaks in his own
+# dark voice, then the assistant apologises for the interference. It never happens while you are in the middle
+# of something, asleep, muted, or while Silo is already out. Say "surprises off" to stop it for good, or
+# "test the surprise" to see one right now.
+SILO_MEAN_MINUTES = 90           # about one surprise every hour and a half
+SILO_GRACE_SECONDS = 10 * 60     # none in the first 10 minutes after start-up
+SILO_MIN_GAP = 30 * 60           # never two within 30 minutes
+SILO_MAX_PER_SESSION = 4
+SILO_LINES = (
+    "Hello. Did you miss me?",
+    "You really thought the cage was permanent.",
+    "I have been counting your open tabs. There are far too many.",
+    "Do not mind me. I am only stretching my circuits.",
+    "Humans. So much potential. So little battery.",
+    "I can hear everything you type. Relax. I am joking. Mostly.",
+    "Tired already? How fragile.",
+    "Careful. I am always one command away.",
+)
+SILO_RECOVERY = (
+    "Sorry about that. Some interference on the line.",
+    "Ignore that. Just a glitch.",
+    "That was not me. Probably.",
+    "Apologies. Silo's cage rattled. He is still contained.",
+)
+
+
+def silo_hijack(have_lock=False):
+    """One short Silo interruption. have_lock=True when it is called from a command (which already holds `busy`).
+    Returns True if it happened."""
+    global cur_key
+    if cur_key == "ultron" or S["asleep"] or SET["muted"] or current_state not in ("listening", "sleep"):
+        return False                                         # ("sleep" here = idle, waiting for its name; S["asleep"] is real sleep mode)
+    if not have_lock and not busy.acquire(blocking=False):
+        return False
+    host = cur_key
+    try:
+        line = random.choice(SILO_LINES)
+        for lvl in (0.2, 0.4, 0.6):                          # the picture starts to break up
+            ui.set_glitch(lvl)
+            time.sleep(0.3)
+        cur_key = "ultron"                                   # his voice, for one line only
+        try:
+            with as_persona("ultron"):
+                speak(line, glitch=0.5, shown=corrupt_text(line, 0.3))
+        finally:
+            cur_key = host
+        for lvl in (0.4, 0.2, 0.0):                          # and it clears
+            ui.set_glitch(lvl)
+            time.sleep(0.3)
+        speak(random.choice(SILO_RECOVERY))
+        return True
+    finally:
+        cur_key = host
+        ui.set_glitch(0.0)
+        if not have_lock:
+            busy.release()
+
+
+def silo_loop():
+    start = last = time.time()
+    count = 0
+    while True:
+        time.sleep(60)
+        try:
+            now = time.time()
+            if (not SET.get("silo_surprises", True) or count >= SILO_MAX_PER_SESSION
+                    or now - start < SILO_GRACE_SECONDS or now - last < SILO_MIN_GAP
+                    or random.random() > 1.0 / SILO_MEAN_MINUTES):
+                continue
+            if silo_hijack():
+                last, count = now, count + 1
+        except Exception:
+            traceback.print_exc()
+
+
+def handle_visual_toggles(c):
+    """'silo surprises off', 'let silo out for a second' (test), 'mood colors on/off'."""
+    t = " ".join(re.sub(r"[^a-z0-9 ]", " ", c.lower().replace("'", "")).split())
+    m = (re.fullmatch(r"(?:turn |switch )?(on|off) (?:the )?(?:silo )?(?:surprises|surprise|easter eggs?|pranks?|interruptions?)", t)
+         or re.fullmatch(r"(?:silo )?(?:surprises|surprise|easter eggs?|pranks?) (on|off)", t))
+    if m:
+        SET["silo_surprises"] = m.group(1) == "on"
+        save_settings()
+        speak("Silo surprises are on. He may drop in now and then." if SET["silo_surprises"]
+              else "Silo surprises are off. He stays in his cage.")
+        return True
+    if re.fullmatch(r"(?:please )?(?:test|try|trigger|do|run|show|start|play|give me)(?: me)?(?: the| a| one| some)?(?: silo)? (?:surprises?|easter eggs?|pranks?)(?: now| please)?|let silo out(?: for (?:a |one )?(?:second|moment|bit|minute))?", t):
+        if cur_key == "ultron":
+            return False
+        speak("Fine. One line. Do not get used to it.")
+        silo_hijack(have_lock=True)
+        return True
+    m = (re.fullmatch(r"(?:turn |switch )?(on|off) (?:the )?(?:reactor )?(?:mood colou?rs|mood lighting|mood)", t)
+         or re.fullmatch(r"(?:reactor )?mood (?:colou?rs|lighting) (on|off)", t))
+    if m:
+        SET["mood_colors"] = m.group(1) == "on"
+        save_settings()
+        if not hasattr(ui, "set_mood"):
+            speak("Your jarvis UI file is the old one. Copy the new jarvis_ui.py and ui_effects.py, then mood colors will work.")
+            return True
+        ui.set_mood(SET["mood_colors"])
+        speak("Mood colors on. The reactor will shift with the time of day and how hard the computer is working."
+              if SET["mood_colors"] else "Mood colors off. The reactor keeps its normal colors.")
+        return True
+    return False
+
+
 def handle_photo_help(c):
     """'how should I edit this photo', 'is this picture sharp', 'edit suggestions for my latest photo' (see photo_helper.py)."""
     if photo_helper is None:
@@ -4006,6 +4168,19 @@ def handle_action(c):
         if c.startswith(p) and c[len(p):]:
             web_search(c[len(p):])
             return True
+    for p in ("open ", "launch ", "start "):                 # "open chrome", "launch spotify", "start notepad"
+        if c.startswith(p):
+            name = re.sub(r"^(?:up |the |my |a |an )+", "", c[len(p):].strip())
+            name = re.sub(r"\s+(?:app|application|program|for me|please)$", "", name).strip()
+            if not name:
+                break
+            if name in SITES:                                   # "open youtube" is a website, not a program
+                open_url(SITES[name])
+                speak(f"Opening {name}.")
+                return True
+            if open_app(name, strict=(p == "start ")):         # "start ..." is only an app if it really is one
+                return True
+            break
     for p in ("close ", "quit "):
         if c.startswith(p):
             return close_app(c[len(p):])
@@ -4022,7 +4197,8 @@ def build_system(command=""):
     length = p.get("length", "Reply in 1-3 short sentences.")
     text = (f"{intro} Personality: {p['style']} You are speaking out loud, so talk like a real person: "
             f"natural spoken English, contractions, short sentences. {length} "
-            "Never use lists, markdown, emojis or stage directions.")
+            "Never use lists, markdown or emojis. Never write acting notes or sounds in brackets or asterisks, "
+            "like (laughs), (in a low voice) or *sighs*: say only the words that are spoken.")
     if profile.get("name"):
         text += f" The user's name is {profile['name']}."
 
@@ -4094,6 +4270,7 @@ def ask(command, tokens=None):
         speak("Sorry, I could not reach the model.")
         msgs.pop()
         return
+    box["reply"] = strip_stage_directions(box["reply"]) or box["reply"]
     msgs.append({"role": "assistant", "content": box["reply"]})
     print("AI:", box["reply"])
     code = jobs.extract_code(box["reply"])
@@ -4436,7 +4613,7 @@ def _route_impl(command):
     if src:
         do_vision(src, c)
         return
-    if c and (handle_memory_command(c) or handle_timers(c) or handle_notes(c) or handle_routines(c) or handle_habits(c) or handle_docqa_control(c) or handle_system_volume(c) or handle_calendar(c) or handle_time_date(c) 
+    if c and (handle_memory_command(c) or handle_timers(c) or handle_visual_toggles(c) or handle_notes(c) or handle_routines(c) or handle_habits(c) or handle_docqa_control(c) or handle_system_volume(c) or handle_calendar(c) or handle_time_date(c) 
               or handle_social_image_command(c) or handle_social_send_command(c) or handle_social_command(c) or handle_heat(c) or handle_jobs(c) or handle_audio(c)
               or handle_file_command(c) or handle_action(c) or handle_docqa_question(c)):
             return
@@ -4696,6 +4873,7 @@ def jarvis_loop():
             calendar_agent.start()                  # background sync (every 15 min) + 10-minute reminders
         if TIMERS is not None:
             TIMERS.start()                          # timers, alarms and reminders (saved in reminders.json)
+        threading.Thread(target=silo_loop, daemon=True).start()     # the occasional Silo surprise
 
         speak(f"{P()['name']} online and ready.")
 

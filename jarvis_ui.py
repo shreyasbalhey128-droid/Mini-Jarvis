@@ -8,7 +8,7 @@ from PIL import Image, ImageOps, ImageTk
 from reactors import (S, CX, CY, RING, R_BIG, R_SAT, ORDER, NAMES, DISPLAY, SUBTITLE, THEMES, RED, ORANGE,
                       Compositor, corrupt_text, mix, ic, CODE_POOL, CONTAIN_SECONDS)
 from vision import grab_screen_raw
-from ui_effects import Typewriter, drawer_step, menu_icon_lines, is_inside
+from ui_effects import Typewriter, drawer_step, menu_icon_lines, is_inside, mood_for
 
 try:
     import psutil  # type: ignore[reportMissingModuleSource]
@@ -22,6 +22,9 @@ HOTKEY_TEXT = "Ctrl+Alt+" + HOTKEY_CHAR
 MIC_HOTKEY_CHAR = "M"          # global shortcut: Ctrl + Alt + M  (mutes / unmutes the microphone)
 MIC_HOTKEY_TEXT = "Ctrl+Alt+" + MIC_HOTKEY_CHAR
 INSTANCE_PORT = 47653          # used so a second launch just wakes the first one
+
+MOOD_COLORS = True             # the active reactor's colour drifts with the time of day and how hard the computer works
+                               # (say "mood colors off" to switch it off; the tint rules are in ui_effects.mood_for)
 
 BG_HEX, BG = "#03060c", (3, 6, 12)
 KEY_HEX, KEY = "#05080f", (5, 8, 15)     # transparent colour for the floating orb
@@ -193,6 +196,8 @@ class JarvisUI:
         self.g = self.g_t = 0.0           # glitch / takeover level (0..1)
         self.shock = 0.0                  # shockwave when Ultron arrives
         self.alert = False                # containment alarm
+        self.mood_on = MOOD_COLORS        # mood colours (see ui_effects.mood_for)
+        self._mood, self._mood_t = (None, 0.0, 1.0), 0.0
         self.containment_progress = 0.0      # 0..1 for the containment animation
         self.hover = None
         self._last_render = 0.0
@@ -557,6 +562,7 @@ class JarvisUI:
     def set_sleep(self, on): self._put("sleep", on)
     def set_persona(self, key): self._put("persona", key)           # key = "jarvis", "friday", ...
     def set_glitch(self, level): self._put("glitch", level)         # 0 = clean .. 1 = Ultron takes over
+    def set_mood(self, on): self._put("mood", on)                   # mood colours on / off
     def contain_ultron(self): self._put("contain_ultron")           # start the containment rays
     def set_alert(self, on): self._put("alert", on)                 # containment alarm
     def set_conversations(self, items, active_id): self._put("convs", items, active_id)
@@ -1128,6 +1134,11 @@ class JarvisUI:
             self._ring_rot += dt * 0.035
         slots = self._slots()
         theme_a = THEMES[self.active]
+        if self.mood_on and not sleeping and time.time() - self._mood_t > 2.0:      # mood: look again every 2 s
+            self._mood_t = time.time()
+            cpu = list(self.hist["cpu"])[-4:]
+            self._mood = mood_for(time.localtime().tm_hour, sum(cpu) / len(cpu) if cpu else None)
+        mood = self._mood if (self.mood_on and not sleeping and self.g < 0.05 and not self.alert) else (None, 0.0, 1.0)
         for k in ORDER:
             e = self.ent[k]
             act = k == self.active
@@ -1137,6 +1148,9 @@ class JarvisUI:
                 dim = 0.45 if sleeping else 1.0
                 tcol = [v * dim for v in th[0][st]]
                 tacc = [v * dim for v in th[1][st]]
+                if mood[0] is not None and k != "ultron":                  # drift towards the mood colour
+                    tcol = [v * mood[2] for v in mix(tcol, mood[0], mood[1])]
+                    tacc = [v * mood[2] for v in mix(tacc, mood[0], mood[1] * 0.6)]
             else:
                 tr, tR = RING, R_SAT * (1.2 if k == self.hover else 1.0)
                 if e["rad"] < 8:
@@ -1451,6 +1465,9 @@ class JarvisUI:
                     self.g_t = max(0.0, min(1.0, float(a)))
                 elif kind == "alert":
                     self.alert = bool(a)
+                elif kind == "mood":
+                    self.mood_on = bool(a)
+                    self._mood_t = 0.0
                 elif kind == "convs":
                     self._apply_convs(a, b)
                 elif kind == "devices":

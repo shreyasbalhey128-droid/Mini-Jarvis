@@ -18,6 +18,40 @@ TYPE_START_PAUSE = 0.18       # short pause after the name/time line, before the
 DRAWER_SPEED = 13.0           # slide-out menu: higher = snappier (it eases out, like a real panel)
 
 
+# ---------------------------------------------------------------- mood colours
+MOOD_NIGHT_DIM = 0.84        # the active reactor is this much dimmer in the small hours
+
+
+def mood_for(hour, cpu):
+    """How the active reactor's colour drifts with the day and with how hard the computer is working.
+    hour = 0..23 (local time), cpu = average CPU % lately (or None).
+    Returns (tint rgb or None, strength 0..1, brightness 0..1); (None, 0, 1) means "leave the colours alone".
+      night 23-5     deep indigo, a little dimmer         dawn 5-8        warm gold
+      evening 20-23  soft violet                          sunset 17-20    amber glow
+      CPU 60+% amber, 75+% orange, 90+% red-orange (the heavier the work, the warmer and stronger)"""
+    if hour >= 23 or hour < 5:
+        tint, s, dim = (90, 80, 210), 0.20, MOOD_NIGHT_DIM
+    elif 5 <= hour < 8:
+        tint, s, dim = (255, 175, 95), 0.12, 1.0
+    elif 17 <= hour < 20:
+        tint, s, dim = (255, 150, 80), 0.10, 1.0
+    elif 20 <= hour < 23:
+        tint, s, dim = (120, 110, 230), 0.10, 0.92
+    else:
+        tint, s, dim = None, 0.0, 1.0
+    if cpu is not None:
+        load, ls = None, 0.0
+        if cpu >= 90:
+            load, ls = (255, 70, 45), 0.45
+        elif cpu >= 75:
+            load, ls = (255, 140, 40), 0.32
+        elif cpu >= 60:
+            load, ls = (255, 190, 60), 0.18
+        if load is not None and ls > s:
+            tint, s, dim = load, ls, 1.0                    # a busy computer beats the time of day
+    return tint, s, dim
+
+
 # ---------------------------------------------------------------- slide-out menu helpers
 def lerp(a, b, p):
     return a + (b - a) * p

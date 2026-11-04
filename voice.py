@@ -97,7 +97,7 @@ SLEEP_CMDS = ("sleep", "go to sleep", "sleep mode", "go to sleep mode", "enter s
 WAKE_CMDS = ("wake up", "wake", "wake up now", "wake up please", "rise and shine")
 AUTO_SLEEP_MINUTES = 10       # 0 = off. e.g. 15 = go to sleep by himself after 15 idle minutes
 FOLLOWUP_SECONDS = 20
-MAX_MESSAGES = 12            # how much of the current chat the model sees
+MAX_MESSAGES = 100            # how much of the current chat the model sees
 START_AS_ORB = False
 AUTO_NAME_CHATS = True       # the AI writes a title for each conversation when it ends
 

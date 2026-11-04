@@ -22,6 +22,18 @@ try:                      # timers, alarms and reminders (see timers_agent.py)
     import timers_agent
 except ImportError:
     timers_agent = None
+try:                      # download songs and PDFs by voice (see download_agent.py; needs: pip install yt-dlp ddgs, and FFmpeg)
+    import download_agent
+except ImportError:
+    download_agent = None
+try:                      # music control by voice: pause, resume, next, previous (see music_agent.py)
+    import music_agent
+except ImportError:
+    music_agent = None
+try:                      # Vortex's news summary, on request and once a day (see news_agent.py)
+    import news_agent
+except ImportError:
+    news_agent = None
 try:                      # Nova's screen debugger: "what's this error?" (see screen_debug.py)
     import screen_debug
 except ImportError:
@@ -3940,6 +3952,238 @@ def handle_jobs(c):
     return True
 
 
+NEWS_CTX = news_agent.NewsContext() if news_agent else None   # what Vortex just read, for follow-up questions
+
+
+def _news_summary(category):
+    """Fetches the headlines and has the local model turn them into a short spoken summary.
+    Returns (text, items). Raises a requests error if there is no internet."""
+    items = news_agent.gather(category)
+    if not items:
+        return "", []
+    try:
+        text = news_agent.clean_summary(llm_once(news_agent.build_prompt(items, category), 220))
+    except Exception:
+        text = ""                                  # the model is busy or off: just read the headlines
+    return text or news_agent.fallback_text(items), items
+
+
+def handle_news(c):
+    """'what's the news', 'tech news', 'turn off daily news', 'daily news at 8 am' (see news_agent.py)."""
+    if news_agent is None:
+        return False
+    cmd = news_agent.parse(c)
+    if cmd is None:
+        return False
+    try:
+        with as_persona("karen"):                  # Vortex does the web work
+            if cmd["kind"] == "daily":
+                SET["news_daily"] = cmd["on"]
+                save_settings()
+                hour = SET.get("news_hour", news_agent.DEFAULT_HOUR)
+                speak(f"Daily news is on. I'll give you the summary after {news_agent.hour_phrase(hour)}."
+                      if cmd["on"] else "Daily news is off.")
+            elif cmd["kind"] == "hour":
+                if not news_agent.hour_ok(cmd["hour"]):
+                    speak("Pick a time before eight in the evening.")
+                else:
+                    SET["news_hour"] = cmd["hour"]
+                    SET["news_daily"] = True
+                    SET["news_last"] = None        # so a new time can still fire today
+                    save_settings()
+                    speak(f"Okay. Your daily news summary will come after {news_agent.hour_phrase(cmd['hour'])}.")
+            elif cmd["kind"] == "topic":
+                _news_topic(cmd["topic"])
+            else:
+                label = news_agent.LABELS.get(cmd["cat"], "the news")
+                speak(f"Checking {label}.")
+                text, items = _news_summary(cmd["cat"])
+                if not items:
+                    speak("I couldn't find any news right now.")
+                else:
+                    NEWS_CTX.set(items, label=label, summary=text)       # so you can ask follow-up questions
+                    ui.log_line("sys", news_agent.headline_log(items))
+                    speak(text)
+    except requests.exceptions.RequestException:
+        speak(OFFLINE)
+    except Exception:
+        traceback.print_exc()
+        speak("Something went wrong with the news. The details are in the console.")
+    return True
+
+
+def _news_topic(topic):
+    """News about any subject: recent headlines from several outlets, summarized by the local model."""
+    speak(f"Looking for news on {topic}.")
+    items = news_agent.topic_items(topic)
+    if not items:
+        speak(f"I found no recent news about {topic}.")
+        return
+    label = f"news about {topic}"
+    try:
+        text = news_agent.clean_summary(llm_once(news_agent.build_prompt(items, label=label), 220))
+    except Exception:
+        text = ""
+    text = text or news_agent.fallback_text(items)
+    NEWS_CTX.set(items, label=label, summary=text, topic=True)
+    ui.log_line("sys", news_agent.headline_log(items))
+    speak(text)
+
+
+def _story_page_text(url):
+    """The readable text of a news article page (for follow-up questions)."""
+    return jobs.html_to_text(jobs.fetch(url))[1]
+
+
+def _news_answer(title, text, question, mode):
+    """The local model answers from the news text only."""
+    out = news_agent.clean_summary(llm_once(news_agent.build_followup_prompt(title, text, question, mode), 260))
+    return out or "I could not work out an answer from that."
+
+
+def run_news_followup(cmd):
+    """Follow-up questions about the news Vortex just read (see news_agent.py)."""
+    ctx = NEWS_CTX
+    kind = cmd["kind"]
+    if kind == "topic":
+        _news_topic(cmd["topic"])
+        return
+    if kind == "list":
+        ctx.touch()
+        speak(news_agent.list_text(ctx.items))
+        return
+
+    idx = None
+    if kind == "story":
+        idx = cmd["index"]
+        if idx == "next":
+            idx = 0 if ctx.active is None else ctx.active + 1
+        elif idx == -1:
+            idx = len(ctx.items) - 1
+    elif ctx.active is not None:                   # "tell me more" / a question about the story we are on
+        idx = ctx.active
+    if kind == "more" and idx is None:
+        ctx.touch()
+        speak(news_agent.list_text(ctx.items, ask=True))
+        return
+    if idx is not None and not 0 <= idx < len(ctx.items):
+        ctx.touch()
+        speak(f"I only have {len(ctx.items)} stories. Say list the stories to hear them.")
+        return
+
+    question = cmd.get("question")
+    mode = "ask" if question else "more"
+    if idx is None:                                # a question about the news as a whole
+        title, text = ctx.label, ctx.context_text()
+    else:
+        item = ctx.items[idx]
+        ctx.active = idx
+        title = item["title"]
+        if item.get("no_fetch"):                   # a topic headline: the headline is all there is
+            speak(f"That headline is from {item['source']}: {title}. "
+                  "Ask me to look up the news on it if you want more.")
+            ctx.touch()
+            return
+        if not item.get("text"):
+            speak("Let me read that story.")
+        text, full = news_agent.story_text(item, _story_page_text)
+        ui.log_line("sys", f"{title} ({item['source']})\n{item.get('link', '')}")
+        if not full:                               # the page could not be read: look for the same story elsewhere
+            wider = news_agent.topic_items(title, n=6)
+            if not wider:
+                speak(f"I could not open that story. All I have is the headline: {title}.")
+                ctx.touch()
+                return
+            text = "\n".join(f"{w['title']} ({w['source']})" for w in wider)
+            title = f"more reports on: {title}"
+    speak(_news_answer(title, text, question, mode))
+    ctx.touch()
+
+
+def handle_news_followup(c):
+    """Follow-up questions in the 10 minutes after the news: 'tell me more about the second story',
+    'why did that happen', 'is that serious', 'next story', 'list the stories'."""
+    if news_agent is None or NEWS_CTX is None or not NEWS_CTX.fresh():
+        return False
+    cmd = news_agent.parse_followup(c, NEWS_CTX)
+    if cmd is None:
+        return False
+    try:
+        with as_persona("karen"):
+            run_news_followup(cmd)
+    except requests.exceptions.RequestException:
+        speak(OFFLINE)
+    except Exception:
+        traceback.print_exc()
+        speak("Something went wrong with that follow-up. The details are in the console.")
+    return True
+
+
+def news_loop():
+    """Vortex's daily news summary: once a day after SET['news_hour'] (default 9 AM), never after 8 PM.
+    It waits while Jarvis is asleep (no extra CPU or heat) and says nothing if Ultron is the active persona."""
+    time.sleep(120)
+    cached = None                                  # (time made, text), kept if it could not be said yet
+    while True:
+        try:
+            if (news_agent is not None and SET.get("news_daily", True) and not S["asleep"] and cur_key != "ultron"
+                    and news_agent.daily_due(time.localtime(), SET.get("news_hour", news_agent.DEFAULT_HOUR),
+                                             SET.get("news_last"))):
+                if cached is None or time.time() - cached[0] > 3600:
+                    text, items = _news_summary("top")
+                    cached = (time.time(), "Here's your news summary. " + text, items, text) if items else None
+                if cached and _say_first(cached[1], persona="karen"):
+                    SET["news_last"] = time.strftime("%Y-%m-%d")
+                    save_settings()
+                    NEWS_CTX.set(cached[2], label=news_agent.LABELS["top"], summary=cached[3])
+                    cached = None
+        except requests.exceptions.RequestException:
+            pass                                   # offline: try again in a few minutes
+        except Exception:
+            traceback.print_exc()
+            cached = None
+        time.sleep(300)
+
+
+def handle_music(c):
+    """'pause the music', 'resume', 'next song', 'skip this', 'previous song' (see music_agent.py)."""
+    if music_agent is None or music_agent.parse(c) is None:
+        return False
+    try:
+        with as_persona("jarvis"):                 # Echo, the daily driver
+            return music_agent.handle(c, speak=speak)
+    except Exception:
+        traceback.print_exc()
+        speak("Something went wrong with the music controls. The details are in the console.")
+        return True
+
+
+def _download_notify(text):
+    """Called from the download thread when a download finishes or fails: waits for its turn, then speaks."""
+    def run():
+        if S["asleep"]:
+            ui.log_line("sys", text)               # asleep: just show it, don't talk
+            return
+        with busy:
+            with as_persona("karen"):              # Vortex's name above the message
+                speak(text)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def handle_download(c):
+    """'download the song ...', 'download the pdf of ...' (see download_agent.py). Vortex does the web work."""
+    if download_agent is None:
+        return False
+    try:
+        with as_persona("karen"):
+            return download_agent.handle_download_command(
+                c, speak=speak, confirm=_yes, notify=_download_notify, raw=S.get("raw_text"))
+    except Exception:
+        traceback.print_exc()
+        speak("Something went wrong with that download. The details are in the console.")
+        return True
+
+
 def handle_voice_settings(c):
     if c in MIC_OFF_CMDS:
         speak("Okay, I've stopped listening. Press the MIC button or Control Alt M when you want me to hear you again.")
@@ -4613,7 +4857,7 @@ def _route_impl(command):
     if src:
         do_vision(src, c)
         return
-    if c and (handle_memory_command(c) or handle_timers(c) or handle_visual_toggles(c) or handle_notes(c) or handle_routines(c) or handle_habits(c) or handle_docqa_control(c) or handle_system_volume(c) or handle_calendar(c) or handle_time_date(c) 
+    if c and (handle_download(c) or handle_music(c) or handle_news(c) or handle_news_followup(c) or handle_memory_command(c) or handle_timers(c) or handle_visual_toggles(c) or handle_notes(c) or handle_routines(c) or handle_habits(c) or handle_docqa_control(c) or handle_system_volume(c) or handle_calendar(c) or handle_time_date(c) 
               or handle_social_image_command(c) or handle_social_send_command(c) or handle_social_command(c) or handle_heat(c) or handle_jobs(c) or handle_audio(c)
               or handle_file_command(c) or handle_action(c) or handle_docqa_question(c)):
             return
@@ -4874,6 +5118,7 @@ def jarvis_loop():
         if TIMERS is not None:
             TIMERS.start()                          # timers, alarms and reminders (saved in reminders.json)
         threading.Thread(target=silo_loop, daemon=True).start()     # the occasional Silo surprise
+        threading.Thread(target=news_loop, daemon=True).start()     # Vortex's daily news summary
 
         speak(f"{P()['name']} online and ready.")
 

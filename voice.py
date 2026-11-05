@@ -96,6 +96,10 @@ SLEEP_CMDS = ("sleep", "go to sleep", "sleep mode", "go to sleep mode", "enter s
               "go sleep", "sleep now", "go to sleep now")
 WAKE_CMDS = ("wake up", "wake", "wake up now", "wake up please", "rise and shine")
 AUTO_SLEEP_MINUTES = 10       # 0 = off. e.g. 15 = go to sleep by himself after 15 idle minutes
+AUTO_PERSONA = True           # the active assistant switches by itself to whoever fits what you ask (Vortex for news, Nova for code...)
+                              # say "turn off auto switching" / "turn on auto switching" to change it by voice
+AUTO_RETURN_SECONDS = 300     # after this many quiet seconds it goes back to the assistant YOU picked
+AUTO_FOLLOWUP_SECONDS = 300   # a short follow-up within this time goes to whoever spoke last
 FOLLOWUP_SECONDS = 20
 MAX_MESSAGES = 100            # how much of the current chat the model sees
 START_AS_ORB = False
@@ -116,6 +120,8 @@ DEBUG_MIC = False
 VISION_KEEP_ALIVE = "30s"        # how long the vision model stays in RAM after a look
 VISION_MAX_SIDE = 896            # pictures are shrunk to this many pixels (bigger = slower)
 CAMERA_INDEX = 0                 # 0 = your first camera; try 1 if you have two
+SCREEN_SWAP = False              # two monitors: "screen 1" is the laptop and "screen 2" the extended one. If he looks at the
+                                 # wrong one (Windows lists them the other way round), set this to True to swap them
 REPHRASE_VISION = True           # the active assistant retells what he saw in his own voice (one more AI call)
 
 # --- Ultron's second confirmation needs your fingerprint (Windows Hello) ---
@@ -131,15 +137,25 @@ OPERA_PATH = None
 SITES = {"youtube": "https://www.youtube.com", "google": "https://www.google.com",
          "gmail": "https://mail.google.com", "github": "https://github.com",
          "whatsapp": "https://web.whatsapp.com", "instagram": "https://www.instagram.com"}
-APP_ALIASES = {"calculator": "calc", "calc": "calc", "notepad": "notepad", "paint": "mspaint",
-               "task manager": "taskmgr", "file explorer": "explorer", "explorer": "explorer",
-               "command prompt": "cmd", "terminal": "wt", "settings": "ms-settings:",
-               "control panel": "control", "snipping tool": "snippingtool"}
-CLOSE_ALIASES = {"opera": "opera", "opera gx": "opera", "chrome": "chrome", "google chrome": "chrome",
-                 "edge": "msedge", "microsoft edge": "msedge", "spotify": "Spotify",
-                 "notepad": "Notepad", "calculator": "CalculatorApp", "paint": "mspaint",
-                 "excel": "EXCEL", "word": "WINWORD", "powerpoint": "POWERPNT",
-                 "virtualbox": "VirtualBox", "pycharm": "pycharm64", "vlc": "vlc"}
+
+APP_ALIASES = {
+    "calculator": "calc", "calc": "calc", "notepad": "notepad", "paint": "mspaint",
+    "task manager": "taskmgr", "file explorer": "explorer", "explorer": "explorer",
+    "command prompt": "cmd", "terminal": "wt", "settings": "ms-settings:",
+    "control panel": "control", "snipping tool": "snippingtool",
+    "vscode": "code", "vs code": "code", "visual studio code": "code",
+    "claude": "claude"
+}
+
+CLOSE_ALIASES = {
+    "opera": "opera", "opera gx": "opera", "chrome": "chrome", "google chrome": "chrome",
+    "edge": "msedge", "microsoft edge": "msedge", "spotify": "Spotify",
+    "notepad": "Notepad", "calculator": "CalculatorApp", "paint": "mspaint",
+    "excel": "EXCEL", "word": "WINWORD", "powerpoint": "POWERPNT",
+    "virtualbox": "VirtualBox", "pycharm": "pycharm64", "vlc": "vlc",
+    "vscode": "Code", "vs code": "Code", "visual studio code": "Code",
+    "claude": "Claude"
+}
 PROTECTED = ["python", "pythonw", "ollama", "ollama app", "explorer", "cmd", "powershell",
              "conhost", "WindowsTerminal", "winlogon", "csrss", "dwm", "taskmgr"]
 
@@ -163,8 +179,7 @@ def persona(name, voice, wake, style, handoff, arrive, **extra):
     return d
 
 
-PERSONAS = {
-    "jarvis": persona("Echo", "en_GB-alan-medium.onnx", ["echo", "eco", "ecco", "ekko"],
+PERSONAS = {"jarvis": persona("Echo", "en_GB-alan-medium.onnx", ["echo", "eco", "ecco", "ekko"],
                       "calm, polished, dry British wit, loyal and quietly confident, like an impeccable butler.",
                       "Of course. Bringing {new} online.",
                       "Echo online. {prev} said you needed me. What can I do?",
@@ -238,6 +253,9 @@ for _k, _p in PERSONAS.items():
 PERSONAS["friday"]["tokens"] = max(PERSONAS["friday"].get("tokens", 0), 420)      # Nova writes code: longer answers
 cur_key = DEFAULT_PERSONA
 before_ultron = DEFAULT_PERSONA      # who to hand control back to when Ultron is contained
+# auto persona: "home" = the assistant YOU chose (auto-switching drifts back to it), "last_ai" = (who spoke, when),
+# "last_cmd" = when you last gave a command
+_auto = {"home": DEFAULT_PERSONA, "last_ai": None, "last_cmd": time.time()}
 
 # --- Face Recognition Agent Initialization ---
 face_agent = FaceRecognitionAgent()
@@ -458,6 +476,13 @@ def load_live_state():
             # Restore persona
             if "persona" in s and s["persona"] in PERSONAS:
                 cur_key = s["persona"]
+            home = s.get("home")
+            if home in PERSONAS and home != "ultron":
+                _auto["home"] = home
+                if cur_key != "ultron":
+                    cur_key = home                    # an assistant that was auto-switched does not outlive a restart
+            elif cur_key != "ultron":
+                _auto["home"] = cur_key
 
             # Restore sleep state
             if "asleep" in s:
@@ -480,7 +505,7 @@ DEFAULT_LABEL = "System default"
 DEV = {"ins": [], "outs": []}
 
 SET = {"muted": False, "volume": 100, "mic": DEFAULT_LABEL, "spk": DEFAULT_LABEL,
-         "model": "llama3.2:3b", "vision_model": "moondream", "ask_remember": True, "aegis_alerts": True}
+         "model": "llama3.2:3b", "vision_model": "moondream", "ask_remember": True, "aegis_alerts": True, "auto_persona": AUTO_PERSONA}
 try:
     with open(SETTINGS_FILE, "r", encoding="utf-8") as _f:
         SET.update(json.load(_f))
@@ -502,6 +527,7 @@ def save_live_state():
     try:
         state = {
             "persona": cur_key,
+            "home": _auto["home"],
             "conv_id": active["conv"]["id"] if active["conv"] else None,
             "mode": ui.mode if ui else "main",
             "asleep": S["asleep"],
@@ -999,7 +1025,9 @@ def handle_social_image_command(c):
         speak("Hold still." if source == "camera" else "One moment.")
         set_state("thinking")
         try:
-            img = ui.grab_screen() if source == "screen" else vision.grab_camera(CAMERA_INDEX)
+            img = capture_screen(what) if source == "screen" else vision.grab_camera(CAMERA_INDEX)
+            if img is None:                              # you cancelled the "which screen?" question
+                return True
             path = _save_capture(img)
         except Exception as e:
             speak(str(e))
@@ -1399,12 +1427,15 @@ class as_persona:
     """with as_persona("edith"): ...  - what is said inside is credited to that assistant in the transcript
     (used when an assistant does its job while another one is active)."""
 
-    def __init__(self, key):
+    def __init__(self, key, switch=True):
         self.key = key
+        self.switch = switch            # False for background messages: they must not hijack the active assistant
 
     def __enter__(self):
         global _speak_as
         self._old, _speak_as = _speak_as, self.key
+        if self.switch:
+            auto_switch(self.key, "that is their job")   # AUTO PERSONA: Vortex does the news, so Vortex is now the one talking
 
     def __exit__(self, *exc):
         global _speak_as
@@ -1413,6 +1444,8 @@ class as_persona:
 
 def emit(who, text, show=True):
     S["last"] = time.time()
+    if who == "ai":
+        _auto["last_ai"] = (_speak_as or cur_key, time.time())     # AUTO PERSONA: follow-ups go to whoever spoke last
     if show:
         ui.log_line(who, text, persona=_speak_as or cur_key)       # the name above a message = who said it
     store(who, text)
@@ -2664,10 +2697,13 @@ def ultron_takeover(old_key):
         traceback.print_exc()
 
 
-def switch_persona(key, quiet=False):
+def switch_persona(key, quiet=False, auto=False):
+    """auto=True is used by the auto-switching: it does not change which assistant is 'yours' (the home one)."""
     global cur_key, before_ultron
     old, new = P(), PERSONAS[key]
     old_key = cur_key
+    if not auto and key != "ultron":
+        _auto["home"] = key                          # the assistant you picked: auto-switching drifts back here when it goes quiet
     if key == "ultron":
         before_ultron = old_key
     if quiet:
@@ -2718,6 +2754,8 @@ def handle_persona(text):
     if not key:
         return False
     if key == cur_key:
+        if key != "ultron":
+            _auto["home"] = key                      # you called the one that is already active: that is your pick
         speak(f"{P()['name']} here. What do you need?")
     elif key == "ultron":
         if ultron_gate():
@@ -2734,6 +2772,140 @@ def strip_wake(text, key=None):
             if re.search(pat, text):
                 return True, " ".join(re.sub(pat, " ", text, count=1).split())
     return False, text
+
+
+# ================= AUTO PERSONA (the active assistant follows the conversation) =================
+# Three things make it work:
+#  1. Whoever does a job becomes the active assistant (see as_persona): ask for the news and Vortex takes over, so
+#     your follow-up questions ("why did that happen?", "tell me more") are answered by Vortex, in Vortex's voice.
+#  2. A short follow-up to whoever spoke last goes back to them (for example after the daily news Vortex gave you).
+#  3. Plain chat about a topic goes to the assistant whose area it is (code -> Nova, CPU/RAM -> Aegis, ...).
+# After AUTO_RETURN_SECONDS of quiet it goes back to the assistant you picked yourself. Silo is never switched in or
+# out automatically. Say "turn off auto switching" / "turn on auto switching".
+AUTO_KEYS = ("jarvis", "friday", "edith", "karen", "veronica")      # Echo, Nova, Aegis, Vortex, Atlas
+
+# (regex, weight) per assistant. A topic switch needs a total of 2 or more: one strong word, or two weak ones.
+AUTO_TOPICS = {
+    "karen": [(r"\bnews\b", 2), (r"\bheadlines?\b", 2), (r"\bbreaking\b", 1), (r"\bsearch (?:the )?(?:web|internet|online)\b", 2),
+              (r"\bgoogle\b", 2), (r"\blook (?:it |that |this )?up\b", 2), (r"\bwikipedia\b", 2), (r"\btrending\b", 2),
+              (r"\bweather\b", 2), (r"\bforecast\b", 1), (r"\bwhat(?:'s| is) happening\b", 2), (r"\bwebsite\b", 1),
+              (r"\bwebpage\b", 1), (r"\barticle\b", 1), (r"\bstock price\b", 2)],
+    "friday": [(r"\bcode\b", 2), (r"\bpython\b", 2), (r"\bjavascript\b", 2), (r"\bscript\b", 2), (r"\bbugs?\b", 2),
+               (r"\bdebug\w*\b", 2), (r"\btraceback\b", 2), (r"\bstderr\b", 2), (r"\bcompile\w*\b", 2), (r"\bsyntax\b", 2),
+               (r"\bgithub\b", 2), (r"\bregex\b", 2), (r"\balgorithm\b", 2), (r"\bfunction\b", 1), (r"\bprogram\b", 1),
+               (r"\bapi\b", 1), (r"\bwrite (?:a|an|me a) (?:program|script|function|class)\b", 2)],
+    "edith": [(r"\bcpu\b", 2), (r"\bram\b", 2), (r"\boverheat\w*\b", 2), (r"\bbattery\b", 2), (r"\bantivirus\b", 2),
+              (r"\bmalware\b", 2), (r"\bfirewall\b", 2), (r"\btask manager\b", 2), (r"\bsystem (?:status|health|stats|report)\b", 2),
+              (r"\blaptop (?:is |feels )?(?:hot|slow|lagging|freezing)\b", 2), (r"\btemperature\b", 1), (r"\bheat\b", 1),
+              (r"\bprocess(?:es)?\b", 1), (r"\bnetwork\b", 1), (r"\bwi-?fi\b", 1), (r"\bsecurity\b", 1)],
+    "veronica": [(r"\bpdfs?\b", 2), (r"\bspreadsheet\b", 2), (r"\bcsv\b", 2), (r"\bdatasets?\b", 2), (r"\bstorage\b", 2),
+                 (r"\bbackups?\b", 2), (r"\bdisk space\b", 2), (r"\bexcel\b", 2),
+                 (r"\bsearch my (?:files|documents|pc|computer)\b", 2),
+                 (r"\bsummari[sz]e (?:this |the )?(?:document|file|pdf)\b", 2),
+                 (r"\bfolders?\b", 1), (r"\bfiles?\b", 1), (r"\bdata\b", 1), (r"\bdocuments?\b", 1)],
+    "jarvis": [(r"\btimers?\b", 2), (r"\balarms?\b", 2), (r"\bremind me\b", 2), (r"\bcalendar\b", 2), (r"\bwhatsapp\b", 2),
+               (r"\binstagram\b", 2), (r"\bto-?do\b", 2), (r"\bjoke\b", 2)],
+}
+_AUTO_COMPILED = {k: [(re.compile(rx), w) for rx, w in rules] for k, rules in AUTO_TOPICS.items()}
+
+# a short question or remark that continues the last topic
+_AUTO_OPENERS = re.compile(
+    r"^(?:and|so|but|also|then|okay|ok|wait|hold on|really|what about|how about|why|how come|who|when|where|which|"
+    r"tell me more|more|go on|continue|keep going|elaborate|expand|explain|what do you mean|"
+    r"can you (?:explain|repeat|expand|elaborate|say)|is that|was that|does that|did that|will that|what does that)\b")
+_AUTO_REFS = re.compile(
+    r"\b(?:that|this|it|those|these|they|them|the (?:first|second|third|fourth|fifth|last|previous|next) "
+    r"(?:one|story|news|article|headline)|the one (?:about|with|where))\b")
+AUTO_FOLLOWUP_WORDS = 14
+
+_AUTO_OFF_RE = re.compile(
+    r"\b(?:turn off|disable|stop|cancel|switch off)\b.{0,25}\bauto(?:matic(?:ally)?)?\b.{0,25}\b(?:persona|personas|assistants?|switch\w*)\b"
+    r"|\bstop (?:automatically )?switching(?: (?:personas|assistants))?\b"
+    r"|\bauto(?:matic(?:ally)?)? (?:persona|assistant|switch)\w* off\b"
+    r"|\bdon't (?:automatically )?switch (?:personas|assistants)\b")
+_AUTO_ON_RE = re.compile(
+    r"\b(?:turn on|enable|start|resume|switch on)\b.{0,25}\bauto(?:matic(?:ally)?)?\b.{0,25}\b(?:persona|personas|assistants?|switch\w*)\b"
+    r"|\bauto(?:matic(?:ally)?)? (?:persona|assistant|switch)\w* on\b"
+    r"|\bswitch (?:personas|assistants) automatically\b")
+
+
+def auto_ok():
+    """True when auto-switching may act right now. Never during Silo, never while asleep."""
+    return bool(SET.get("auto_persona", True)) and cur_key != "ultron" and not S["asleep"]
+
+
+def auto_switch(key, reason=""):
+    """Quietly makes `key` the active assistant (reactors + voice), without the hand-off speech. Returns True if it switched."""
+    if not key or key not in AUTO_KEYS or key == cur_key or not auto_ok():
+        return False
+    try:
+        switch_persona(key, quiet=True, auto=True)
+        ui.log_line("sys", f"({PERSONAS[key]['name']} took over: {reason})")
+        return True
+    except Exception:
+        traceback.print_exc()
+        return False
+
+
+def auto_return_check():
+    """Quiet for a while? Go back to the assistant you picked yourself."""
+    home = _auto["home"]
+    if (home in AUTO_KEYS and cur_key != home and auto_ok()
+            and time.time() - _auto["last_cmd"] > AUTO_RETURN_SECONDS):
+        try:
+            switch_persona(home, quiet=True, auto=True)
+            ui.log_line("sys", f"({PERSONAS[home]['name']} is back.)")
+        except Exception:
+            traceback.print_exc()
+
+
+def auto_topic(c):
+    """The assistant whose area this is (strongest match), or None."""
+    c = c.lower()
+    best, best_score = None, 1
+    for k, rules in _AUTO_COMPILED.items():
+        score = sum(w for rx, w in rules if rx.search(c))
+        if score > best_score:
+            best, best_score = k, score
+    return best
+
+
+def auto_is_followup(c):
+    words = c.lower().split()
+    if not words or len(words) > AUTO_FOLLOWUP_WORDS:
+        return False
+    text = " ".join(words)
+    return bool(_AUTO_OPENERS.search(text) or _AUTO_REFS.search(text))
+
+
+def auto_pick(c):
+    """For plain chat that no handler took: a clear topic first (it names whose area this is), otherwise a short
+    follow-up goes back to whoever spoke last."""
+    if not auto_ok():
+        return
+    key = auto_topic(c)
+    if key:
+        auto_switch(key, "that is their area")
+        return
+    last = _auto["last_ai"]
+    if (last and last[0] in AUTO_KEYS and last[0] != cur_key
+            and time.time() - last[1] <= AUTO_FOLLOWUP_SECONDS and auto_is_followup(c)):
+        auto_switch(last[0], "you were just talking to them")
+
+
+def handle_auto_persona(c):
+    """'turn off auto switching' / 'turn on auto switching'."""
+    if _AUTO_OFF_RE.search(c):
+        SET["auto_persona"] = False
+        save_settings()
+        speak(f"Okay. I'll stay as {P()['name']} until you ask for someone else.")
+        return True
+    if _AUTO_ON_RE.search(c):
+        SET["auto_persona"] = True
+        save_settings()
+        speak("Auto switching is on. I'll hand over to whoever fits what you ask.")
+        return True
+    return False
 
 
 # ================= BROWSER (Opera GX) =================
@@ -2864,13 +3036,13 @@ def _say_first(text, persona=None):
     if current_state not in ("listening", "sleep"):
         return False
     if S["asleep"] or SET["muted"]:
-        with as_persona(persona):
+        with as_persona(persona, switch=False):
             emit("ai", text)                       # text only: it shows up (typed out) in the transcript
         return True
     if not busy.acquire(blocking=False):           # never wait for / hold up a command in progress
         return False
     try:
-        with as_persona(persona):
+        with as_persona(persona, switch=False):
             speak(text)
     finally:
         busy.release()
@@ -3812,9 +3984,11 @@ def handle_screen_debug(c):
         speak(random.choice(DEBUG_INTROS))
         set_state("thinking")
         try:
-            img = ui.grab_screen()
+            img = capture_screen(c)                              # asks which monitor if you have two
         except Exception as e:
             speak(str(e))
+            return True
+        if img is None:                                          # you cancelled the "which screen?" question
             return True
         ui.show_vision(img, "SCREEN CAPTURE")
         try:
@@ -3825,7 +3999,8 @@ def handle_screen_debug(c):
         text = screen_debug.pick_error_text(ocr)
         if len(text.strip()) < 15:                               # nothing readable: let the vision model try
             ui.end_vision(2)
-            do_vision("screen", "read the error message on this screen and explain what it means and how to fix it")
+            do_vision("screen", "read the error message on this screen and explain what it means and how to fix it",
+                      screen=_screen_pick["last"])               # the screen you just chose: do not ask twice
             return True
         ui.log_line("sys", f"[debug] read {len(ocr)} characters from the screen"
                            + ("" if screen_debug.has_error_lines(ocr) else " (no obvious error line, using the end of the text)"))
@@ -4150,7 +4325,7 @@ def handle_music(c):
     if music_agent is None or music_agent.parse(c) is None:
         return False
     try:
-        with as_persona("jarvis"):                 # Echo, the daily driver
+        with as_persona("jarvis", switch=False):   # Echo, the daily driver (pause / next must not change who is talking)
             return music_agent.handle(c, speak=speak)
     except Exception:
         traceback.print_exc()
@@ -4165,7 +4340,7 @@ def _download_notify(text):
             ui.log_line("sys", text)               # asleep: just show it, don't talk
             return
         with busy:
-            with as_persona("karen"):              # Vortex's name above the message
+            with as_persona("karen", switch=False):   # Vortex's name above the message (a background message: no switch)
                 speak(text)
     threading.Thread(target=run, daemon=True).start()
 
@@ -4175,7 +4350,7 @@ def handle_download(c):
     if download_agent is None:
         return False
     try:
-        with as_persona("karen"):
+        with as_persona("karen", switch=bool(re.search(r"\bdownload", c))):     # only a real download request switches
             return download_agent.handle_download_command(
                 c, speak=speak, confirm=_yes, notify=_download_notify, raw=S.get("raw_text"))
     except Exception:
@@ -4524,6 +4699,197 @@ def ask(command, tokens=None):
     save_convs()
 
 
+# ================= WHICH SCREEN? (laptop screen + extended monitor) =================
+# With two or more monitors Jarvis asks which one to look at before every screen capture: "screen 1" is the laptop,
+# "screen 2" the extended monitor (or "both"). Say it in the command and he does not ask: "what's on my second screen".
+# Say "always look at the laptop screen" to stop the question, and "ask me which screen" to bring it back.
+# With one monitor nothing changes. If he picks the wrong monitor, set SCREEN_SWAP = True at the top of this file.
+_screen_pick = {"last": None}                  # the screen chosen last time (also used by the debugger's fallback)
+
+_SCREEN_WORDS = {"one": 0, "1": 0, "first": 0, "two": 1, "2": 1, "second": 1,
+                 "three": 2, "3": 2, "third": 2, "four": 3, "4": 3, "fourth": 3}
+_SCREEN_NUM_RE = re.compile(r"\b(?:screen|monitor|display)\s*(one|two|three|four|1|2|3|4)\b"
+                            r"|\b(first|second|third|fourth)\s+(?:screen|monitor|display)\b")
+_SCREEN_BOTH_RE = re.compile(r"\b(?:both|all)(?: (?:of )?(?:my|the|your))? (?:screens|monitors|displays)\b|\bboth\b")
+
+
+def _screen_rects():
+    """The monitors as [(left, top, right, bottom), ...] in real pixels, laptop (screen 1) first. [] if unknown.
+    Windows only; any problem returns [] and the old single-screen capture is used."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+        user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+        proto = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
+                                   ctypes.POINTER(wintypes.RECT), ctypes.c_void_p)
+        found = []
+
+        def cb(hmon, hdc, rect, lparam):
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            if user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+                r = info.rcMonitor
+                found.append((r.left, r.top, r.right, r.bottom, bool(info.dwFlags & 1)))   # 1 = the primary monitor
+            return 1
+
+        old = None
+        try:                                       # real pixels (this thread only), the same ones PIL grabs
+            user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+            user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+            old = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+        except Exception:
+            old = None
+        try:
+            user32.EnumDisplayMonitors(None, None, proto(cb), 0)
+        finally:
+            if old:
+                try:
+                    user32.SetThreadDpiAwarenessContext(old)
+                except Exception:
+                    pass
+        found.sort(key=lambda m: (not m[4], m[0], m[1]))          # the primary monitor first, then left to right
+        rects = [m[:4] for m in found]
+        return rects[::-1] if (SCREEN_SWAP and len(rects) > 1) else rects
+    except Exception:
+        return []
+
+
+def _parse_screen(text, loose, n):
+    """Which screen did he mean? Returns 0-based index, 'both' or None.
+    loose=False: a command ('look at my second screen'), only clear words. loose=True: the answer to my question."""
+    t = " ".join(re.sub(r"[^a-z0-9' ]", " ", (text or "").lower()).split())
+    if not t:
+        return None
+    if _SCREEN_BOTH_RE.search(t) and (loose or re.search(r"\b(?:screens|monitors|displays)\b", t)):
+        return "both"
+    pick = None
+    if loose:
+        words = t.split()
+        for w in words:                            # the first word that names a screen wins ("the laptop one")
+            if w in _SCREEN_WORDS:
+                pick = _SCREEN_WORDS[w]
+            elif w in ("laptop", "builtin", "main", "primary"):
+                pick = 0
+            elif w in ("extended", "extend", "external", "secondary", "extra", "other"):
+                pick = 1
+            elif w in ("to", "too") and len(words) <= 3:       # "two" misheard
+                pick = 1
+            if pick is not None:
+                break
+    else:
+        hits = []
+        for m in _SCREEN_NUM_RE.finditer(t):
+            hits.append((m.start(), _SCREEN_WORDS[m.group(1) or m.group(2)]))
+        for m in re.finditer(r"\blaptop\b|\bbuilt ?in\b", t):
+            hits.append((m.start(), 0))
+        for m in re.finditer(r"\bextended\b|\bexternal\b", t):
+            hits.append((m.start(), 1))
+        if hits:
+            pick = min(hits)[1]
+    return pick if (pick is not None and pick < n) else None
+
+
+def ask_which_screen(rects):
+    """Asks which monitor (spoken or typed). Returns the 0-based index, 'both', or None if you cancelled."""
+    n = len(rects)
+    if n == 2:
+        q = ("Which one, little human? The laptop, or the extended screen?" if cur_key == "ultron" else
+             "Which screen should I look at? Screen 1, the laptop, or screen 2, the extended monitor?")
+    else:
+        q = f"Which screen should I look at? Screen 1 to {n}, or both?"
+    ui.log_line("sys", "Screens: " + ", ".join(f"screen {i + 1} = {r[2] - r[0]}x{r[3] - r[1]}" for i, r in enumerate(rects)))
+    for attempt in range(2):
+        if speak(q if attempt == 0 else "Sorry, which one? Say screen 1, screen 2, or both."):
+            return None                            # you said stop while he was asking
+        set_state("listening")
+        res = confirm_input(15)
+        if not res:
+            speak("I didn't hear an answer, so I'll skip it.")
+            return None
+        ans, spoken = res
+        if spoken and ans:
+            emit("you", ans)
+        if ans.strip() in NOOP_WORDS or re.search(r"\b(cancel|never mind|nevermind|stop|forget it)\b", ans):
+            speak("Okay, never mind.")
+            return None
+        pick = _parse_screen(ans, True, n)
+        if pick is not None:
+            return pick
+    speak("I couldn't tell which screen you meant, so I'll skip it.")
+    return None
+
+
+def capture_screen(command="", intro=None, screen=None):
+    """A picture of the screen. With two or more monitors he asks which one first (unless you said it in the command,
+    `screen` is given, or you turned the question off). Returns the image, or None if you cancelled.
+    With one monitor, or if the monitors cannot be listed, it works exactly as before."""
+    rects = _screen_rects()
+    if len(rects) < 2:
+        if intro:
+            speak(intro)
+            set_state("thinking")
+        return ui.grab_screen()
+    n = len(rects)
+    pick = screen if (screen == "both" or isinstance(screen, int)) else None
+    if pick is None:
+        pick = _parse_screen(command, False, n)
+    if pick is None and not SET.get("ask_screen", True):
+        saved = SET.get("screen_default")
+        pick = saved if (saved == "both" or (isinstance(saved, int) and saved < n)) else None
+    if pick is None:
+        pick = ask_which_screen(rects)
+        if pick is None:
+            return None
+    _screen_pick["last"] = pick
+    if intro:
+        speak(intro)
+    set_state("thinking")
+    try:
+        from PIL import ImageGrab
+        if pick == "both":
+            return ImageGrab.grab(all_screens=True)
+        ui.log_line("sys", f"(looking at screen {pick + 1}{', the laptop' if pick == 0 else ', the extended monitor' if pick == 1 else ''})")
+        return ImageGrab.grab(bbox=rects[pick], all_screens=True)
+    except Exception:
+        traceback.print_exc()
+        ui.log_line("sys", "Could not capture that screen, using the main one.")
+        return ui.grab_screen()
+
+
+_SCREEN_ALWAYS_RE = re.compile(r"\balways (?:look at|use|check|show|see|capture|take) (?:the |my )?(.+)$")
+_SCREEN_ASK_RE = re.compile(r"\b(?:ask me|start asking)\b.{0,20}\b(?:which|what) (?:screen|monitor|display)\b"
+                            r"|\bask (?:me )?which screen\b")
+
+
+def handle_screen_pref(c):
+    """'always look at the laptop screen' (no more questions) / 'ask me which screen' (questions are back)."""
+    if _SCREEN_ASK_RE.search(c):
+        SET["ask_screen"] = True
+        save_settings()
+        speak("Okay. When you have two screens I'll ask which one to look at.")
+        return True
+    m = _SCREEN_ALWAYS_RE.search(c)
+    if m and re.search(r"\b(screen|screens|monitor|monitors|display|displays|laptop|extended|external|both)\b", m.group(1)):
+        pick = _parse_screen(m.group(1), True, 4)
+        if pick is None:
+            return False
+        SET["screen_default"] = pick
+        SET["ask_screen"] = False
+        save_settings()
+        name = "both screens" if pick == "both" else "screen 1, the laptop" if pick == 0 else \
+            "screen 2, the extended monitor" if pick == 1 else f"screen {pick + 1}"
+        speak(f"Okay. I'll always look at {name} without asking. Say ask me which screen to bring the question back.")
+        return True
+    return False
+
+
 # ================= SEEING (screen + camera) =================
 LOOK_INTRO = {
     "default": {"screen": ["Let me take a look at your screen.", "One moment, checking your screen.",
@@ -4536,6 +4902,8 @@ LOOK_INTRO = {
                           "So this is the face of the species that feared me."]},
 }
 SCREEN_RE = re.compile(r"\b(my screen|the screen|your screen|on screen|screenshot|my display|my monitor|"
+                       r"(?:my|the) (?:laptop|extended|external|second|first|other|main) (?:screen|monitor|display)|"
+                       r"screen (?:one|two|1|2)|both screens|"
                        r"this page|this window|this tab)\b")
 LOOK_RE = re.compile(r"\b(look|see|read|check|describe|what(?:'s|s)?|summari[sz]e|explain|tell|analy[sz]e|"
                      r"solve|translate|help|take|show|watch|going on|wrong)\b")
@@ -4561,18 +4929,24 @@ def is_generic_look(c):
     return len(_FILLER_RE.sub(" ", rest).split()) <= 1
 
 
-def do_vision(source, command=""):
+def do_vision(source, command="", screen=None):
     """Takes ONE picture (screen or camera), has the local vision model describe it,
-    then the active assistant answers in his own voice."""
+    then the active assistant answers in his own voice. With two monitors he asks which screen first."""
     label = "SCREEN CAPTURE" if source == "screen" else "CAMERA"
     intros = LOOK_INTRO.get(cur_key, LOOK_INTRO["default"])[source]
-    speak(random.choice(intros))
-    set_state("thinking")
     try:
-        img = ui.grab_screen() if source == "screen" else vision.grab_camera(CAMERA_INDEX)
+        if source == "screen":
+            img = capture_screen(command, intro=random.choice(intros), screen=screen)   # asks which monitor (if you have two)
+        else:
+            speak(random.choice(intros))
+            set_state("thinking")
+            img = vision.grab_camera(CAMERA_INDEX)
     except Exception as e:
         speak(str(e))
         return
+    if img is None:                                  # you cancelled the "which screen?" question
+        return
+    set_state("thinking")
     ui.show_vision(img, label)
 
     # --- OCR Step ---
@@ -4810,6 +5184,8 @@ def maybe_offer(fact):
 
 def route(command):
     """Runs the command; afterwards, if you told him something about yourself, asks whether to remember it."""
+    auto_return_check()                                      # AUTO PERSONA: quiet for a while -> back to your assistant
+    _auto["last_cmd"] = time.time()
     fact = None
     if SET.get("ask_remember", True) and cur_key != "ultron":
         try:
@@ -4817,6 +5193,7 @@ def route(command):
         except Exception:
             traceback.print_exc()
     _route_impl(command)
+    _auto["last_cmd"] = time.time()
     if fact and not S["asleep"] and cur_key != "ultron" and SET.get("ask_remember", True):
         maybe_offer(fact)
 
@@ -4826,6 +5203,10 @@ def _route_impl(command):
     if handle_persona(command):
         return
     c = clean_command(command)
+    if c and handle_auto_persona(c):                         # "turn off auto switching"
+        return
+    if c and handle_screen_pref(c):                          # "always look at the laptop screen" / "ask me which screen"
+        return
 
     # --- Mood Detection ---
     # We use the last captured utterance from the Ears queue if available
@@ -4861,6 +5242,7 @@ def _route_impl(command):
               or handle_social_image_command(c) or handle_social_send_command(c) or handle_social_command(c) or handle_heat(c) or handle_jobs(c) or handle_audio(c)
               or handle_file_command(c) or handle_action(c) or handle_docqa_question(c)):
             return
+    auto_pick(c or command)                                  # AUTO PERSONA: plain chat goes to whoever fits (follow-up or topic)
     ask(command)
 
 
@@ -4875,6 +5257,8 @@ def handle_event(ev):
                     switch_persona(key)
             else:
                 switch_persona(key)
+        elif key and key != "ultron":
+            _auto["home"] = key                      # you tapped the active reactor: that is your pick
     elif kind == "conv":
         open_conversation(arg)
     elif kind == "newconv":
@@ -5141,6 +5525,11 @@ def jarvis_loop():
                 from_sleep = True
             elif not key:
                 continue
+            if key:
+                if key != "ultron":
+                    _auto["home"] = key                   # you called an assistant by name: that is your pick now
+            else:
+                auto_return_check()                       # AUTO PERSONA: quiet for a while -> back to your assistant
             key = key or cur_key
             S["last"] = time.time()
 

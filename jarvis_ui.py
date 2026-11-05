@@ -194,6 +194,7 @@ class JarvisUI:
         self.active = "jarvis"
         self.pname = NAMES[self.active]
         self.g = self.g_t = 0.0           # glitch / takeover level (0..1)
+        self._ult_shown = False           # is the red 'CORRUPTED NEURAL GRID' banner up right now?
         self.shock = 0.0                  # shockwave when Ultron arrives
         self.alert = False                # containment alarm
         self.mood_on = MOOD_COLORS        # mood colours (see ui_effects.mood_for)
@@ -1214,6 +1215,7 @@ class JarvisUI:
     def _refresh_titles(self, g):
         c = self.canvas
         ult = self.active == "ultron" or g > 0.5
+        self._ult_shown = ult
         if ult:
             t1 = "STATUS: S.I.L.O. NETWORK :: CORRUPTED NEURAL GRID"
             if g > 0.2:
@@ -1429,6 +1431,8 @@ class JarvisUI:
                     self._refresh_titles(self.g)
         else:
             c.itemconfigure(self.title2, state="normal")
+            if self._ult_shown:                           # the glitch faded out: bring the normal title back
+                self._refresh_titles(self.g)
 
     # ---------- main loop ----------
     def _tick(self):

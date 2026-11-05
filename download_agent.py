@@ -9,6 +9,7 @@ voice.py already calls this through handle_download(); you do not need to edit a
 
 Voice examples:
     "download the song Blinding Lights by The Weeknd"
+    "download bad angel by lisa"        (no kind said: treated as a song, he asks before saving)
     "download the pdf of attention is all you need"
 Typed example (links only survive when typed):
     "download this pdf https://example.com/file.pdf"
@@ -38,7 +39,18 @@ USER_AGENT = (
 )
 
 URL_RE = re.compile(r"https?://\S+")
-DOWNLOAD_WORDS_RE = re.compile(r"\b(download|grab)\b", re.IGNORECASE)
+DOWNLOAD_START_RE = re.compile(
+    r"^(?:(?:please|just|go ahead and|can you|could you|will you|would you|i want to|i want you to|i need to|"
+    r"i would like to|i'd like to|i wanna)\s+)*(?:download|grab)\b", re.IGNORECASE)
+PDF_WORDS = {"pdf", "book", "ebook", "paper", "document"}
+SONG_WORDS = {"song", "music", "mp3", "track"}
+# things this agent cannot download: it says so instead of letting the chat model pretend
+OTHER_WORDS = {"app", "apps", "software", "installer", "setup", "exe", "zip", "driver", "drivers", "game", "games",
+               "windows", "movie", "movies", "film", "films", "video", "videos", "series", "episode", "episodes",
+               "season", "torrent", "apk", "iso", "file", "files", "image", "images", "photo", "photos",
+               "wallpaper", "wallpapers", "chrome", "firefox", "python", "vscode"}
+CANT_LINE = ("I can only download songs and PDFs. Say download the song, or download the PDF of, "
+             "then the name. For a PDF link, type it so it ends in dot pdf.")
 PDF_SPOKEN_RE = re.compile(r"\bp\.?\s?d\.?\s?f\b", re.IGNORECASE)   # "p d f" -> "pdf"
 OFFLINE_HINTS = ("getaddrinfo", "network is unreachable", "temporary failure", "timed out",
                  "connection", "name resolution", "unable to download")
@@ -256,18 +268,27 @@ def handle_download_command(text, speak=print, confirm=None, notify=None,
     Returns True if this was a download command (handled, even if it failed),
     False if it is not one, so your other handlers can run.
     """
-    if not text or not DOWNLOAD_WORDS_RE.search(text):
+    if not text or not DOWNLOAD_START_RE.match(text.strip().lower()):
         return False
 
     text = PDF_SPOKEN_RE.sub("pdf", text)
     lowered = text.lower()
+    words = set(re.findall(r"[a-z0-9']+", lowered))
     url_match = URL_RE.search(raw or "") or URL_RE.search(text)
-    wants_pdf = "pdf" in lowered or bool(
+    wants_pdf = bool(PDF_WORDS & words) or bool(
         url_match and url_match.group(0).lower().split("?")[0].endswith(".pdf"))
-    wants_song = any(word in lowered.split() for word in ("song", "music", "mp3", "track"))
+    wants_song = bool(SONG_WORDS & words)
 
     if not (wants_pdf or wants_song):
-        return False  # "download" something this agent does not handle
+        # "download bad angel by lisa": no kind said. Something else we cannot get -> say so (never hand it to the
+        # chat model, which would pretend). Otherwise it is a song title.
+        if not _clean_query(text):
+            speak("What should I download? I can get songs and PDFs.")
+            return True
+        if url_match or (OTHER_WORDS & words):
+            speak(CANT_LINE)
+            return True
+        wants_song = True
 
     confirm = confirm or _default_confirm
     notify = notify or speak
@@ -331,7 +352,7 @@ def handle_download_command(text, speak=print, confirm=None, notify=None,
         return True
 
     if not confirm(f"I found {title}. Download it?"):
-        speak("Okay, cancelled.")
+        speak("Okay, cancelled. To try again, say download, then the song and the artist.")
         return True
 
     def job():

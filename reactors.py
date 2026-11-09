@@ -486,6 +486,92 @@ def draw_containment_rays(cv, ents, p, t=0.0):
     if p > CONTAIN_LOCK:                                                 # ...and an outgoing shockwave
         q = (p - CONTAIN_LOCK) / (1.0 - CONTAIN_LOCK)
         ring(d, ux, uy, R * (1.0 + 4.0 * q), ic(sc((255, 150, 90), (1.0 - q) * fade)), 2)
+# ---------------------------------------------------------------- physics: springs, embers, dust, ripples
+def spring_step(x, v, target, dt, k, z):
+    """One step of a damped spring (substepped, so it stays stable at any frame rate).
+    k = stiffness (higher = faster), z = damping: 1.0 settles with no overshoot, 0.6 overshoots a little and
+    settles, 0.2 wobbles for a long time. Returns the new (position, velocity)."""
+    dt = min(dt, 0.25)
+    n = int(dt / 0.012) + 1
+    h = dt / n
+    c = 2.0 * z * math.sqrt(k)
+    for _ in range(n):
+        v += (k * (target - x) - c * v) * h
+        x += v * h
+    return x, v
+
+
+class Fx:
+    """Everything that flies around the reactors: embers that leave the rim of the active one (more while it thinks
+    and speaks), slowly drifting dust, and the sparks + ripple when a new assistant lands in the middle.
+    Positions are in the reactor picture (S x S). Pure Python, a few hundred operations per frame."""
+    MAX = 170
+
+    def __init__(self, n_motes=14, seed=None):
+        self.rng = random.Random(seed)
+        self.parts = []          # [x, y, vx, vy, age, life, size, drag, colour]
+        self.rings = []          # [age, colour]
+        self.emit = 0.0
+        self.motes = [[self.rng.uniform(0, S), self.rng.uniform(0, S), self.rng.uniform(0, 6.28),
+                       self.rng.uniform(0.5, 1.4), self.rng.uniform(0.6, 1.2)] for _ in range(n_motes)]
+
+    def burst(self, x, y, n, col, speed=(120.0, 300.0), life=(0.55, 1.1), r0=0.0):
+        for _ in range(n):
+            if len(self.parts) >= self.MAX:
+                break
+            a, s = self.rng.uniform(0, 2 * math.pi), self.rng.uniform(*speed)
+            self.parts.append([x + math.cos(a) * r0, y + math.sin(a) * r0, math.cos(a) * s, math.sin(a) * s, 0.0, self.rng.uniform(*life),
+                               self.rng.uniform(1.4, 2.8), 2.6, tuple(col)])
+
+    def ripple(self, col):
+        self.rings.append([0.0, tuple(col)])
+
+    def update(self, dt, t, main, st, lvl, sleeping, col):
+        dt = min(dt, 0.1)
+        for p in self.parts:
+            d = math.exp(-p[7] * dt)                                        # air drag
+            p[2] = p[2] * d + math.sin(p[1] * 0.045 + t * 1.7) * 14.0 * dt  # and a little turbulence
+            p[3] = p[3] * d + math.cos(p[0] * 0.045 + t * 1.3) * 14.0 * dt
+            p[0] += p[2] * dt
+            p[1] += p[3] * dt
+            p[4] += dt
+        self.parts = [p for p in self.parts if p[4] < p[5]]
+        for r in self.rings:
+            r[0] += dt
+        self.rings = [r for r in self.rings if r[0] < 1.15]
+        for m in self.motes:                                                 # dust: slow drift, wraps around
+            m[0] = (m[0] + (math.sin(t * 0.21 + m[2]) * 7.0 + 3.0 * m[3]) * dt) % S
+            m[1] = (m[1] + (math.cos(t * 0.17 + m[2] * 1.7) * 6.0 - 2.0 * m[3]) * dt) % S
+        if sleeping or main is None:
+            return
+        self.emit += (1.0 + (9.0 if st == "thinking" else 0.0) + 30.0 * lvl) * dt
+        while self.emit >= 1.0:
+            self.emit -= 1.0
+            if len(self.parts) >= self.MAX:
+                break
+            a, R = self.rng.uniform(0, 2 * math.pi), main["R"]
+            s, tg = self.rng.uniform(16.0, 52.0), self.rng.uniform(-16.0, 16.0)
+            ca, sa = math.cos(a), math.sin(a)
+            self.parts.append([main["x"] + ca * R * 0.97, main["y"] + sa * R * 0.97, ca * s - sa * tg, sa * s + ca * tg,
+                               0.0, self.rng.uniform(0.9, 1.9), self.rng.uniform(1.0, 2.0), 1.1, tuple(col)])
+
+    def primitives(self, main, col, sleeping):
+        """What to draw: dots (x, y, radius, colour) and rings (x, y, radius, colour, width)."""
+        dots, rings = [], []
+        for p in self.parts:
+            f = 1.0 - p[4] / p[5]                                             # fades out as it ages
+            dots.append((p[0], p[1], p[6] * (0.55 + 0.45 * f), ic(sc(mix(p[8], (255, 255, 255), 0.55 * f), f ** 1.0))))
+        for m in self.motes:
+            dots.append((m[0], m[1], m[4], ic(sc(col, 0.10 if sleeping else 0.24 * m[4]))))
+        cx, cy = (main["x"], main["y"]) if main else (CX, CY)
+        for age, c in self.rings:
+            f = age / 1.15
+            k = (1.0 - f) ** 1.15
+            rings.append((cx, cy, 30.0 + f * S * 0.5, ic(sc(mix(c, (255, 255, 255), 0.35), k)), 4 if f < 0.35 else 2))
+            rings.append((cx, cy, 22.0 + f * S * 0.42, ic(sc(c, k * 0.55)), 2))      # a fainter echo behind it
+        return dots, rings
+
+
 class Compositor:
     def __init__(self, size, bg=True, key=None):
         self.n, self.key = size, key
@@ -522,7 +608,7 @@ Image.BILINEAR).filter(ImageFilter.GaussianBlur(2.2)).resize((n, n), Image.BILIN
 Image.BILINEAR).filter(ImageFilter.GaussianBlur(1.6)).resize((n, n), Image.BILINEAR)
         glow = ImageChops.screen(ImageChops.add(q, q), ImageChops.add(w, w))
         return ImageChops.screen(self.base, ImageChops.screen(layer, ImageChops.screen(h, glow)))
-    def render(self, ents, t, dt, g=0.0, shock=0.0, alert=False, containment=0.0):
+    def render(self, ents, t, dt, g=0.0, shock=0.0, alert=False, containment=0.0, fx=None):
         img = Image.new("RGB", (self.n, self.n), (0, 0, 0))
         cv = Cv(img, self.sprite, self.flare_h, self.flare_v)
         main = None
@@ -552,6 +638,12 @@ e["detail"])
                 if f > 0:
                     rr = (1 - f) * self.n * 0.62
                     ring(cv.d, main["x"], main["y"], rr, ic(sc(RED, f)), 3 if i == 0 else 1)
+
+        if fx:                                                          # embers, dust and ripples (they glow with the rest)
+            for x, y, r, c in fx.get("dots", ()):
+                cv.d.ellipse([x - r, y - r, x + r, y + r], fill=c)
+            for x, y, rr, c, w in fx.get("rings", ()):
+                ring(cv.d, x, y, rr, c, w)
 
         # Draw containment rays if active
         if containment > 0:

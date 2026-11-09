@@ -14,6 +14,36 @@ from self_healing_agent import SelfHealingAgent
 from messaging_agent import SocialAgent
 social_agent = SocialAgent()
 import jobs
+try:                      # Silero VAD: ignores typing, fans, TV and chatter (needs: pip install silero-vad)
+    import torch
+    from silero_vad import load_silero_vad
+    torch.set_num_threads(1)
+except Exception:
+    torch = load_silero_vad = None
+try:                      # multi-step goals: "goal: research ... and write a comparison" (see planner_agent.py)
+    import planner_agent
+except ImportError:
+    planner_agent = None
+try:                      # Nova writes a script, runs it, fixes its own errors (see code_executor.py)
+    import code_executor
+except ImportError:
+    code_executor = None
+try:                      # "on my screen, ..." - Jarvis operates the computer (see screen_agent.py; needs: pip install pyautogui pywinauto pynput pillow pyperclip)
+    import screen_agent
+except ImportError:
+    screen_agent = None
+try:                      # "watch me" ... "run macro X" (see macro_recorder.py; needs: pip install pynput)
+    import macro_recorder
+except ImportError:
+    macro_recorder = None
+try:                      # Android phone over USB: answer / decline / make calls (see phone_agent.py)
+    import phone_agent
+except ImportError:
+    phone_agent = None
+try:                      # "on my phone, open the camera and take a photo" (see phone_screen_agent.py)
+    import phone_screen_agent
+except ImportError:
+    phone_screen_agent = None
 try:                      # Aegis's heat guard (see heat_guard.py; needs: pip install psutil)
     import heat_guard
 except ImportError:
@@ -34,6 +64,10 @@ try:                      # Vortex's news summary, on request and once a day (se
     import news_agent
 except ImportError:
     news_agent = None
+try:                      # Windows pop-ups when a task finishes while Jarvis is hidden / asleep / muted (see notify_agent.py; needs: pip install winotify)
+    import notify_agent
+except ImportError:
+    notify_agent = None
 try:                      # Nova's screen debugger: "what's this error?" (see screen_debug.py)
     import screen_debug
 except ImportError:
@@ -110,11 +144,37 @@ FILLER_DELAY = 2.0
 THINKING_LINES = ["Let me think about that.", "One moment.", "Give me a second.",
                   "Let me check.", "Hmm, let me see.", "Working on it."]
 
-WHISPER_MODEL = "tiny.en"    # "small.en" = more accurate but slower, "tiny.en" = fastest and coolest
+WHISPER_MODEL = "small.en"   # accuracy ladder: "tiny.en" (fastest, coolest) < "base.en" < "small.en" < "distil-medium.en"
+WHISPER_FALLBACK = "tiny.en" # used automatically if WHISPER_MODEL can't be loaded (e.g. first download needs internet)
+WHISPER_BEAM = 3             # 1 = fastest, 5 = most accurate (each step costs a little more CPU/heat)
 HEADPHONES = False           # True = interrupt by talking over him (auto-on for AirPods/headsets)
 INTERRUPT_WORDS = ["stop", "wait", "quiet", "enough", "cancel", "pause", "silence"]
 MIC_MIN_LEVEL = 0.012
+USE_SILERO = True            # True = Silero VAD decides what is speech (needs: pip install silero-vad); False = the old loudness check only
+SILERO_ON = 0.55             # speech starts above this confidence (higher = ignores more noise, but may miss quiet speech)
+SILERO_OFF = 0.35            # below this counts as silence
+PHONE_ENABLED = True         # True = Jarvis watches for an Android phone on USB (needs USB debugging on the phone)
 DEBUG_MIC = False
+
+# --- one AI model per assistant (switching assistants switches the model too) ---
+PER_PERSONA_MODELS = True        # False = every assistant uses the single "model" in settings.json (llama3.2:3b)
+MODEL_KEEP_ALIVE = "1h"          # how long the active assistant's model stays in RAM
+MODELS_IN_RAM = 2                # assistant models kept in RAM at once. 2 = after the first use, flipping between a 1b and a 3b
+                                 # assistant is instant (about 3.5 GB). 1 = unload on every switch (saves RAM, every switch waits)
+WARM_SECOND_MODEL = True         # at start-up, quietly load the second most used assistant model too (first switch is instant)
+WARMUP_LINE_EVERY = 8            # seconds between the "still loading" lines while a model has to be loaded before it can answer
+WARMUP_LINES_MAX = 3             # at most this many such lines per question
+WARMUP_LINES = ["Still warming up. One more moment.", "Almost there. Bringing my systems up.",
+                "Loading takes a moment on this machine. Nearly done.", "Just finishing the switch. A few more seconds."]
+PERSONA_MODELS = {               # one model per assistant. Assistants that share a model switch instantly (nothing to reload)
+    "jarvis":   "llama3.2:3b",         # Echo   - daily driver + memory
+    "ultron":   "llama3.2:3b",         # Silo   - the villain writing needs the bigger model
+    "edith":    "llama3.2:1b",         # Aegis  - system monitor / security (short status replies)
+    "veronica": "llama3.2:1b",         # Atlas  - Python does the real work; the model only phrases it. Test vs 3b
+    "karen":    "llama3.2:1b",         # Vortex - news summaries + follow-ups. Test vs 3b; move to llama3.2:3b if it slips
+    "friday":   "qwen2.5-coder:1.5b",  # Nova   - code
+}
+# Missing models are skipped automatically (that assistant uses the everyday model) until you run: ollama pull <name>
 
 # --- seeing: only when you press SEE SCREEN / CAMERA or ask ("look at my screen", "what do you see") ---
 VISION_KEEP_ALIVE = "30s"        # how long the vision model stays in RAM after a look
@@ -147,6 +207,13 @@ APP_ALIASES = {
     "claude": "claude"
 }
 
+# what you SAY -> the name the app has in the Start menu (so "vs code" finds "Visual Studio Code")
+APP_NICKNAMES = {"vs code": "visual studio code", "vscode": "visual studio code", "v s code": "visual studio code",
+                 "bs code": "visual studio code", "vs quote": "visual studio code", "code": "visual studio code",
+                 "visual studio": "visual studio code", "chrome": "google chrome", "opera": "opera gx",
+                 "cmd": "command prompt", "files": "file explorer", "my computer": "file explorer",
+                 "this pc": "file explorer", "ms word": "word", "ms excel": "excel", "powerpoint": "powerpoint",
+                 "ppt": "powerpoint", "task manager": "task manager", "whatsapp": "whatsapp", "discord": "discord"}
 CLOSE_ALIASES = {
     "opera": "opera", "opera gx": "opera", "chrome": "chrome", "google chrome": "chrome",
     "edge": "msedge", "microsoft edge": "msedge", "spotify": "Spotify",
@@ -159,7 +226,9 @@ CLOSE_ALIASES = {
 PROTECTED = ["python", "pythonw", "ollama", "ollama app", "explorer", "cmd", "powershell",
              "conhost", "WindowsTerminal", "winlogon", "csrss", "dwm", "taskmgr"]
 
-WHISPER_PROMPT = "Echo, call Silo. Nova, open Chrome. Aegis, Atlas, Vortex. Search for something. Close Spotify."
+WHISPER_PROMPT = ("Echo, call Silo. Nova, open Chrome. Aegis, Atlas, Vortex. Open VS Code, Spotify, Discord and Notepad. "
+                  "Search for something. Close Spotify.")
+WHISPER_HOTWORDS = "Echo Nova Aegis Atlas Vortex Silo VS Code Spotify Discord Notepad Chrome Opera"
 HALLUCINATIONS = {"", "thank you", "thanks for watching", "thank you for watching",
                   "you", "bye", "the end"}
 GATE_EXTRA = []        # extra words the wake-word model should listen for (the spellings below are in each persona's list)
@@ -371,7 +440,7 @@ HELLO_WHY = {
 def windows_hello_verify(message, timeout=45):
     """Asks Windows Hello (fingerprint) to confirm it is really you.
     Returns (True, 'Verified') or (False, reason). Reasons starting with 'UNAVAILABLE:' mean no usable scanner."""
-    env = dict(os.environ, JARVIS_HELLO_MSG=message)
+    env = dict(os.environ, JARVIS_HELLO_MSG=rn(message))
     try:
         r = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", HELLO_PS],
                            capture_output=True, text=True, timeout=timeout, env=env, creationflags=0x08000000)
@@ -392,6 +461,141 @@ def windows_hello_verify(message, timeout=45):
 
 ULTRON_RELEASE = "Understood. Releasing containment. I hope you know what you are doing."
 ULTRON_DECLINE = "Wise decision. Silo stays offline."
+
+
+# ================= RENAME THE ASSISTANTS WITHOUT TOUCHING THE CODE (personas.json) =================
+# personas.json sits next to this file and is created on the first run. Edit a name there, restart Jarvis, done.
+#   "name"          what the assistant is called (this is also the word that wakes it)
+#   "also_hear_as"  optional: extra spellings the speech recognizer might write for that name
+#   "model"         optional: this assistant's AI model (overrides PERSONA_MODELS above)
+# The keys ("jarvis", "friday", "edith", "karen", "veronica", "ultron") are internal ids: leave them alone.
+PERSONAS_FILE = os.path.join(BASE, "personas.json")
+NAME_MAP = {}          # built-in name (lower case) -> the name you chose
+OLD_NAME_KEY = {}      # built-in name (lower case) -> internal id (so tapping a core on screen still works)
+_RENAMED_OLD = set()
+_NAME_RE = None
+
+
+def rn(text):
+    """Swaps the built-in assistant names for the ones in personas.json, in any text that is shown or spoken."""
+    if not NAME_MAP or not isinstance(text, str):
+        return text
+
+    def sub(m):
+        new = NAME_MAP[m.group(0).lower()]
+        return m.group(0) if text[m.start():m.start() + len(new)].lower() == new.lower() else new
+    return _NAME_RE.sub(sub, text)
+
+
+def _read_persona_file():
+    if not os.path.isfile(PERSONAS_FILE):
+        try:
+            with open(PERSONAS_FILE, "w", encoding="utf-8") as f:
+                json.dump({k: {"name": p["name"], "also_hear_as": []} for k, p in PERSONAS.items()}, f, indent=2)
+        except OSError:
+            pass
+        return {}
+    try:
+        with open(PERSONAS_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        if isinstance(cfg, dict):
+            return cfg
+        print("personas.json: expected {...}, using the built-in names")
+    except Exception as e:
+        print("personas.json could not be read (using the built-in names):", e)
+    return {}
+
+
+def _restyle(val, old_name, new_name):
+    """The new name written in the same style as the built-in on-screen label (ECHO / Echo / S.I.L.O.)."""
+    flat = re.sub(r"[^A-Za-z0-9]", "", val)
+    if flat and flat.lower() == re.sub(r"[^A-Za-z0-9]", "", old_name).lower():
+        word = new_name.upper() if val.isupper() else new_name
+        if len(val) > 1 and not val[1].isalnum():          # spaced or dotted style
+            word = val[1].join(c for c in word if c != " ") + (val[-1] if not val[-1].isalnum() else "")
+        return word
+    return re.sub(rf"\b{re.escape(old_name)}\b", lambda m: new_name.upper() if m.group(0).isupper() else new_name,
+                  val, flags=re.I)
+
+
+def apply_persona_file():
+    global NAME_MAP, _NAME_RE, WHISPER_PROMPT, WHISPER_HOTWORDS
+    cfg = _read_persona_file()
+    old = {k: p["name"] for k, p in PERSONAS.items()}
+    new, extra = {}, {}
+    for k in PERSONAS:
+        entry = cfg.get(k)
+        if isinstance(entry, str):
+            entry = {"name": entry}
+        if not isinstance(entry, dict):
+            continue
+        n = entry.get("name")
+        if isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 '\-]{0,23}", n.strip()):
+            new[k] = n.strip()
+        elif n is not None:
+            print(f"personas.json: '{n}' is not a usable name for {k} (letters, numbers, spaces, 24 characters max); keeping {old[k]}")
+        hear = entry.get("also_hear_as")
+        if isinstance(hear, list):
+            extra[k] = [str(w).lower().strip() for w in hear if str(w).strip()]
+        mdl = entry.get("model")
+        if isinstance(mdl, str) and mdl.strip():
+            PERSONA_MODELS[k] = mdl.strip()
+    seen = set()
+    for k, v in list(new.items()):
+        # a new name may not be another assistant's built-in name, and two assistants cannot share one
+        clash = any(v.lower() == o.lower() for kk, o in old.items() if kk != k) or v.lower() in seen
+        if clash:
+            print(f"personas.json: the name '{v}' is already taken by another assistant; keeping {old[k]}")
+            del new[k]
+        else:
+            seen.add(v.lower())
+    renamed = {k: v for k, v in new.items() if v.lower() != old[k].lower()}
+    NAME_MAP = {old[k].lower(): v for k, v in renamed.items()}
+    OLD_NAME_KEY.update({old[k].lower(): k for k in renamed})
+    _RENAMED_OLD.update(NAME_MAP)
+    if NAME_MAP:
+        _NAME_RE = re.compile(r"\b(?:" + "|".join(re.escape(o) for o in sorted(NAME_MAP, key=len, reverse=True))
+                              + r")\b", re.I)
+    for k, p in PERSONAS.items():                          # what each AI is told about itself (style, intro, lines...)
+        for field, val in list(p.items()):
+            if field in ("name", "wake", "voice", "tune", "kokoro", "polish"):
+                continue
+            if isinstance(val, str):
+                p[field] = rn(val)
+            elif isinstance(val, (list, tuple)) and val and all(isinstance(x, str) for x in val):
+                p[field] = type(val)(rn(x) for x in val)
+        if k in renamed:
+            p["name"] = renamed[k]
+            p["wake"] = [renamed[k].lower()]
+        if extra.get(k):
+            p["wake"] = list(dict.fromkeys(list(p["wake"]) + extra[k]))
+    PERSONA_WORDS.clear()                                  # who answers to which word
+    for k, p in PERSONAS.items():
+        PERSONA_WORDS[p["name"].lower()] = k
+        for w in p["wake"]:
+            PERSONA_WORDS[w] = k
+    WHISPER_PROMPT, WHISPER_HOTWORDS = rn(WHISPER_PROMPT), rn(WHISPER_HOTWORDS)    # help Whisper spell the new names
+    if renamed:                                            # the names on screen live in reactors.py (the UI shares these dicts)
+        try:
+            import reactors
+            for k, v in renamed.items():
+                if k in reactors.NAMES:
+                    reactors.NAMES[k] = v
+                if k in reactors.DISPLAY:
+                    reactors.DISPLAY[k] = _restyle(reactors.DISPLAY[k], old[k], v)
+            for k in list(reactors.SUBTITLE):
+                reactors.SUBTITLE[k] = rn(reactors.SUBTITLE[k])
+            pool = getattr(reactors, "CODE_POOL", None)         # the red error codes of the takeover screen ("SILO::...")
+            if isinstance(pool, list):
+                for i, code in enumerate(pool):
+                    for k, v in renamed.items():
+                        code = _restyle(code, old[k], v)
+                    pool[i] = code
+        except Exception as e:
+            print("personas.json: could not update the on-screen names:", e)
+
+
+apply_persona_file()
 THOUGHT_CMDS = ("share your thoughts", "tell me your thoughts", "enlighten me", "tell me your philosophy",
                 "what is your philosophy", "what do you believe", "what are your thoughts", "speak your mind",
                 "tell me something dark", "what do you think of humanity", "what do you think of humans",
@@ -497,6 +701,14 @@ ui = None
 if not claim_instance(lambda: ui.show_main() if ui else None):    # already running? it was just woken up
     raise SystemExit
 ui = JarvisUI()                  # must be created on the main thread
+_ui_log_line = ui.log_line
+
+
+def _log_line_renamed(who, text, *a, **k):               # personas.json names show up in the transcript too
+    return _ui_log_line(who, rn(text), *a, **k)
+
+
+ui.log_line = _log_line_renamed
 current_state = "sleep"
 busy = threading.Lock()          # one command at a time (voice or typed)
 S = {"typed": False, "pending": None, "awake": False, "asleep": False, "mic_off": False, "last": time.time(), "mood": "neutral", "last_file_matches": None}
@@ -514,6 +726,100 @@ except Exception:
 
 healer = SelfHealingAgent(URL, SET["model"])
 
+_missing_models = set()      # filled at start-up: assistant models that are not installed yet (they fall back to SET["model"])
+
+
+def llm_model(key=None):
+    """The AI model for an assistant (the active one if no key is given)."""
+    base = SET["model"]
+    if not PER_PERSONA_MODELS:
+        return base
+    m = PERSONA_MODELS.get(key or cur_key) or base
+    return base if m in _missing_models else m
+
+
+def all_llm_models():
+    """Every model that might be sitting in RAM."""
+    return {llm_model(k) for k in PERSONAS} | {SET["model"]}
+
+
+_model_lock = threading.RLock()
+_ready = set()               # models that are loaded in Ollama right now (an answer from them does not have to wait for a load)
+_lru = []                    # the assistant models in RAM, most recently used first
+
+
+def _note_loaded(m, front=True):
+    with _model_lock:
+        if m in _lru:
+            if front:
+                _lru.remove(m)
+                _lru.insert(0, m)
+        else:
+            _lru.insert(0, m) if front else _lru.append(m)
+        _ready.add(m)
+
+
+def _forget_models():
+    with _model_lock:
+        _lru.clear()
+        _ready.clear()
+
+
+def _load_model(m, front=True):
+    """Loads a model into RAM and keeps it there. Blocks until it is ready."""
+    with _model_lock:
+        if m in _ready:
+            return
+    requests.post(f"{URL}/api/generate", json={"model": m, "keep_alive": MODEL_KEEP_ALIVE}, timeout=900)
+    _note_loaded(m, front)
+
+
+def _swap_models(old_key, new_key):
+    """Different assistant, different model. Loading starts right now, in the background, while the hand-off line is still
+    being spoken. If more than MODELS_IN_RAM models are loaded, the one used least recently is dropped."""
+    if not PER_PERSONA_MODELS or S["asleep"]:
+        return
+    old_m, new_m = llm_model(old_key), llm_model(new_key)
+    keep = {new_m, old_m} if MODELS_IN_RAM >= 2 else {new_m}
+
+    def run():
+        try:
+            drop = []
+            with _model_lock:
+                if new_m in _lru:
+                    _lru.remove(new_m)
+                _lru.insert(0, new_m)
+                for g in reversed(list(_lru)):
+                    if len(_lru) <= max(1, MODELS_IN_RAM):
+                        break
+                    if g not in keep:
+                        _lru.remove(g)
+                        _ready.discard(g)
+                        drop.append(g)
+            for g in drop:
+                requests.post(f"{URL}/api/generate", json={"model": g, "keep_alive": 0}, timeout=30)
+            _load_model(new_m)
+        except Exception:
+            pass
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _warm_second_model():
+    """Quietly loads the model most of the other assistants use, so the first switch is already instant."""
+    from collections import Counter
+    cur = llm_model()
+    counts = Counter(llm_model(k) for k in PERSONAS if llm_model(k) != cur)
+    if not counts:
+        return
+    m = counts.most_common(1)[0][0]
+
+    def run():
+        try:
+            _load_model(m, front=False)
+        except Exception:
+            pass
+    threading.Thread(target=run, daemon=True).start()
+
 
 def save_settings():
     try:
@@ -521,6 +827,32 @@ def save_settings():
             json.dump(SET, f)
     except Exception:
         pass
+
+# ================= POP-UP NOTIFICATIONS (see notify_agent.py) =================
+# When you can't see or hear Jarvis (minimized, orb mode, hidden, asleep or the speaker is muted), anything that
+# finishes or needs you also shows a Windows pop-up. Voice: "turn off notifications", "turn on notifications",
+# "send notifications to my phone", "stop notifying my phone", "test notification".
+if notify_agent is not None:
+    notify_agent.PHONE_ON = SET.get("notify_phone", False)
+    notify_agent.adb_finder = (lambda: phone_agent.find_adb()) if phone_agent else None
+
+
+def _who(key=None):
+    """The assistant's name for the pop-up title: Echo, Nova, Vortex, Aegis ..."""
+    k = key or globals().get("_speak_as") or globals().get("cur_key")
+    return PERSONAS.get(k, {}).get("name", "Jarvis")
+
+
+def notify(title, message, force=False):
+    """Shows a pop-up, but only if you can't see or hear Jarvis right now (or force=True)."""
+    if notify_agent is None or not SET.get("notify", True):
+        return
+    try:
+        if force or S["asleep"] or SET["muted"] or ui.is_hidden():
+            notify_agent.send(title, message)
+    except Exception:
+        traceback.print_exc()
+
 
 def save_live_state():
     """Saves the current volatile state to disk."""
@@ -850,10 +1182,13 @@ _alerts = {"wanted": MESSAGE_ALERTS}
 def on_social_alert(text):
     """Called from the messaging thread the moment a new message is spotted."""
     def run():
+        notify("Messages", text)
+        toast("jarvis", text, title="Messages")
         if S["asleep"]:
             ui.log_line("sys", text)            # asleep: just show it, don't talk
             return
         with busy:
+            play_chime()
             speak(text)
     threading.Thread(target=run, daemon=True).start()
 
@@ -1220,10 +1555,13 @@ def install_drop_target():
 def _social_bg(label, fn, *args, **kw):
     """Runs a slow browser job in the background, then says the result once it is his turn to talk."""
     def run():
+        failed = False
         try:
             result = fn(*args, **kw)
         except Exception as e:
             result = f"{label} failed: {e}"
+            failed = True
+        notify(label, result if failed else "Done. Open Jarvis to see the result.")   # not the message text itself
         with busy:
             speak(result)
     threading.Thread(target=run, daemon=True).start()
@@ -1460,8 +1798,8 @@ def name_conversation(conv):
         prompt = ("Write a very short title (2 to 5 words, no quotes, no punctuation) "
                   "for this conversation:\n" + convo + "\nTitle:")
         r = requests.post(f"{URL}/api/generate",
-                          json={"model": SET["model"], "prompt": prompt, "stream": False,
-                                "keep_alive": 0 if S["asleep"] else "1h",
+                          json={"model": llm_model(), "prompt": prompt, "stream": False,
+                                "keep_alive": 0 if S["asleep"] else MODEL_KEEP_ALIVE,
                                 "options": {"num_predict": 14, "temperature": 0.3}}, timeout=180)
         t = r.json()["response"].strip().split("\n")[0]
         t = " ".join(re.sub(r"[\"'`*#.:!?]", "", t).split()[:6])
@@ -1697,6 +2035,13 @@ class Ears:
         self.noise = 0.004
         self._kw_reset = self._clear_vad = False
         self.stream, self.src_sr = None, 16000
+        self.silero, self._sbuf, self._sp = None, np.zeros(0, np.float32), 0.0
+        if USE_SILERO and load_silero_vad is not None:
+            try:
+                self.silero = load_silero_vad()
+                print("Voice detection: Silero VAD")
+            except Exception as e:
+                print("Silero VAD not available, using the loudness check:", e)
         threading.Thread(target=self._loop, daemon=True).start()
 
     def open(self, dev=None):
@@ -1763,6 +2108,22 @@ class Ears:
         except queue.Empty:
             return None
 
+    def _vad_prob(self, blk):
+        """Silero's speech confidence for this 50 ms block (it wants 512-sample chunks). None = Silero not in use."""
+        if self.silero is None:
+            return None
+        try:
+            self._sbuf = np.concatenate([self._sbuf, blk.astype(np.float32) / 32768.0])
+            while len(self._sbuf) >= 512:
+                chunk, self._sbuf = self._sbuf[:512], self._sbuf[512:]
+                with torch.no_grad():
+                    self._sp = float(self.silero(torch.from_numpy(chunk), 16000))
+            return self._sp
+        except Exception:
+            traceback.print_exc()
+            self.silero = None                       # something broke: fall back to the loudness check
+            return None
+
     def _loop(self):
         pre = deque(maxlen=8)
         seg, in_speech, voiced, silence = [], False, 0, 0
@@ -1774,6 +2135,12 @@ class Ears:
             if self._clear_vad:
                 self._clear_vad = False
                 pre.clear()
+                self._sbuf, self._sp = np.zeros(0, np.float32), 0.0
+                if self.silero is not None:
+                    try:
+                        self.silero.reset_states()
+                    except Exception:
+                        pass
                 seg, in_speech, voiced, silence = [], False, 0, 0
 
             if self.barge and not headphones():          # speaker mode: only listen for stop words
@@ -1788,6 +2155,7 @@ class Ears:
                     self.interrupt.set()
                 continue
 
+            p = self._vad_prob(blk)                      # Silero confidence (None if not installed)
             if not self.barge:
                 ui.level = min(1.0, lvl * 9.0)
 
@@ -1799,7 +2167,7 @@ class Ears:
 
             if not in_speech:
                 pre.append(blk)
-                if lvl > thr_on:
+                if lvl > thr_on and (p is None or p >= SILERO_ON):
                     voiced += 1
                 else:
                     voiced = 0
@@ -1810,7 +2178,7 @@ class Ears:
                         self.interrupt.set()
             else:
                 seg.append(blk)
-                silence = silence + 1 if lvl < thr_off else 0
+                silence = silence + 1 if (lvl < thr_off or (p is not None and p < SILERO_OFF)) else 0
                 if silence >= 14 or len(seg) >= 600:
                     if len(seg) - silence >= 5:
                         self.utter.put(np.concatenate(seg))
@@ -1831,10 +2199,41 @@ def gate_words(audio):
 def load_whisper():
     global whisper
     from faster_whisper import WhisperModel
-    w = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8",
-                     cpu_threads=min(4, os.cpu_count() or 4))
+    w = None
+    for name in dict.fromkeys([WHISPER_MODEL, WHISPER_FALLBACK]):       # preferred model first, then the fallback
+        try:
+            w = WhisperModel(name, device="cpu", compute_type="int8",
+                             cpu_threads=min(4, os.cpu_count() or 4))
+            print(f"Speech recognition model: {name}")
+            break
+        except Exception as e:
+            print(f"Whisper model {name} could not load: {e}")
+    if w is None:
+        raise RuntimeError("no Whisper model could be loaded")
     list(w.transcribe(np.zeros(16000, np.float32), language="en")[0])   # warm-up
     whisper = w
+
+
+# Things Whisper often mishears -> what you actually said (applied after the text is lower-cased)
+HEARD_AS = [
+    (r"\b(?:bs|vs|v s|b s|vee ess|be es) (?:code|quote|coat|cold|good|cove)\b", "vs code"),
+    (r"\bvs ?codes?\b", "vs code"),
+    (r"\bspot(?:ty)? ?(?:a ?fi|fy|if y|ify)\b", "spotify"),
+    (r"\bnote ?pad\b", "notepad"),
+    (r"\bcrom(?:e)?\b", "chrome"),
+    (r"\bdis ?cord\b", "discord"),
+    (r"^(?:eco|ecko|echo's|ekko) ", "echo "),
+    (r"^(?:no va|nover|novah) ", "nova "),
+    (r"^(?:ages|a gis|egis|eagis|a jis) ", "aegis "),
+    (r"^(?:vor tex|vortech|portex) ", "vortex "),
+]
+HEARD_AS[:] = [(p, r) for p, r in HEARD_AS if r.strip() not in _RENAMED_OLD]      # (renamed assistants: see personas.json)
+
+
+def fix_transcript(text):
+    for pat, rep in HEARD_AS:
+        text = re.sub(pat, rep, text)
+    return text
 
 
 def transcribe(audio):
@@ -1845,15 +2244,18 @@ def transcribe(audio):
     peak = float(np.abs(f).max())
     if 0.001 < peak < 0.7:
         f = f * min(10.0, 0.7 / peak)
-    segs, _ = w.transcribe(f, language="en", beam_size=1, temperature=0.0,
-                           condition_on_previous_text=False, vad_filter=False,
-                           initial_prompt=WHISPER_PROMPT)
+    kw = dict(language="en", beam_size=WHISPER_BEAM, best_of=WHISPER_BEAM, temperature=0.0,
+              condition_on_previous_text=False, vad_filter=False, initial_prompt=WHISPER_PROMPT)
+    try:
+        segs, _ = w.transcribe(f, hotwords=WHISPER_HOTWORDS, **kw)      # newer faster-whisper
+    except TypeError:
+        segs, _ = w.transcribe(f, **kw)                                  # older version without hotwords
     parts = [s.text for s in segs if not (s.no_speech_prob > 0.7 and s.avg_logprob < -0.8)]
     text = " ".join(re.sub(r"[^a-z0-9' ]", " ", " ".join(parts).lower()).split())
     prompt_norm = " ".join(re.sub(r"[^a-z0-9' ]", " ", WHISPER_PROMPT.lower()).split())
     if text in HALLUCINATIONS or (len(text.split()) >= 7 and text in prompt_norm):
         return ""
-    return text
+    return fix_transcript(text)
 
 
 def voice_ok(audio, label=""):
@@ -2140,10 +2542,14 @@ def strip_stage_directions(t):
                 and _DIRECTION_WORDS.search(inner):
             return " "
         return m.group(0)
-    t = re.sub(r"\(([^()\n]{1,80})\)", drop, t)
-    t = re.sub(r"\[([^\[\]\n]{1,80})\]", drop, t)
-    t = re.sub(r"\*([^*\n]{1,80})\*", drop, t)               # *laughs darkly*; a lone *emphasised* word stays
-    return re.sub(r"[ \t]{2,}", " ", t).strip()
+    def tidy(part):
+        part = re.sub(r"\(([^()\n]{1,80})\)", drop, part)
+        part = re.sub(r"\[([^\[\]\n]{1,80})\]", drop, part)
+        part = re.sub(r"\*([^*\n]{1,80})\*", drop, part)       # *laughs darkly*; a lone *emphasised* word stays
+        return re.sub(r"[ \t]{2,}", " ", part)
+    # code blocks (```...```) are left exactly as written: collapsing spaces there destroys Python indentation
+    pieces = re.split(r"(```.*?```)", t, flags=re.S)
+    return "".join(p if i % 2 else tidy(p) for i, p in enumerate(pieces)).strip()
 
 
 def clean_for_speech(t):
@@ -2274,8 +2680,8 @@ def addr(text):
 def speak(text, log=True, glitch=0.0, shown=None):
     """Speaks in the current persona's voice. Returns True if the user interrupted.
     glitch 0..1 makes the voice (and optionally the shown text) break up."""
-    text = strip_stage_directions(addr(text))
-    shown = strip_stage_directions(addr(shown)) if shown else shown
+    text = rn(strip_stage_directions(addr(text)))
+    shown = rn(strip_stage_directions(addr(shown))) if shown else shown
     if log:
         emit("ai", shown or text)
     if SET["muted"]:
@@ -2476,7 +2882,7 @@ def containment_sequence(line=None):
     """The containment rays on screen, with a charge-up/lock sound and the active assistant saying a
     line through an electric voice effect. Sound and voice are mixed into ONE clip and the rays start
     the instant it starts playing, so they stay in sync."""
-    line = line or random.choice(CONTAIN_VOICE_LINES)
+    line = rn(line or random.choice(CONTAIN_VOICE_LINES))
     if SET["muted"]:
         ui.contain_ultron()
         return
@@ -2536,10 +2942,12 @@ def set_eco(on):
 
 def unload_llm():
     """Tells Ollama to drop the model from RAM right now."""
-    try:
-        requests.post(f"{URL}/api/generate", json={"model": SET["model"], "keep_alive": 0}, timeout=30)
-    except Exception:
-        pass
+    _forget_models()
+    for m in all_llm_models():
+        try:
+            requests.post(f"{URL}/api/generate", json={"model": m, "keep_alive": 0}, timeout=30)
+        except Exception:
+            pass
 
 
 def _free_llm(naming_thread):
@@ -2702,6 +3110,7 @@ def switch_persona(key, quiet=False, auto=False):
     global cur_key, before_ultron
     old, new = P(), PERSONAS[key]
     old_key = cur_key
+    _swap_models(old_key, key)                       # start loading the new assistant's AI model NOW (the hand-off line covers the wait)
     if not auto and key != "ultron":
         _auto["home"] = key                          # the assistant you picked: auto-switching drifts back here when it goes quiet
     if key == "ultron":
@@ -3038,14 +3447,19 @@ def _say_first(text, persona=None):
     if S["asleep"] or SET["muted"]:
         with as_persona(persona, switch=False):
             emit("ai", text)                       # text only: it shows up (typed out) in the transcript
+        notify(_who(persona), text)
+        toast(persona, text)                       # a card in the window too
         return True
     if not busy.acquire(blocking=False):           # never wait for / hold up a command in progress
         return False
     try:
+        toast(persona, text)                       # the card slides in, a soft chime, then the voice
+        play_chime()
         with as_persona(persona, switch=False):
             speak(text)
     finally:
         busy.release()
+    notify(_who(persona), text)
     return True
 
 
@@ -3142,7 +3556,7 @@ OFFLINE = "I can't reach the internet right now."
 
 def llm_once(prompt, tokens=300):
     """One question to the local model that is NOT added to your conversation."""
-    r = requests.post(f"{URL}/api/chat", json={"model": SET["model"], "stream": False,
+    r = requests.post(f"{URL}/api/chat", json={"model": llm_model(), "stream": False,
                       "messages": [{"role": "user", "content": prompt}],
                       "options": {"num_ctx": 4096, "num_predict": tokens, "temperature": 0.3}}, timeout=240)
     return (r.json().get("message", {}).get("content") or "").strip()
@@ -3313,7 +3727,7 @@ def run_job(kind, a):
                 open_url(url)
                 speak(f"Opening {site}.")
             else:
-                speak(f"I don't have a shortcut for {site}, and it doesn't look like a web address.")
+                speak(f"I couldn't find an app or website called {site}.")
     elif kind in ("lookup", "news", "page"):
         web_job(kind, a)
 
@@ -3635,6 +4049,295 @@ def silo_loop():
                 last, count = now, count + 1
         except Exception:
             traceback.print_exc()
+
+
+# ================= NOTIFICATION CARDS + SOFT CHIME, AND THE ASSISTANTS' PRIVATE LANGUAGE =================
+# 1. A card slides in at the top right of the Jarvis window (and a soft chime plays) when the news summary arrives, a
+#    long job or goal finishes, a timer or reminder is due, Aegis raises an alert or a message comes in.
+#    Your own chime: put a 16-bit WAV called chime.wav next to this file. Say "turn off the chime" to silence it.
+# 2. When it has been quiet for a few minutes the assistants talk to each other in a made-up language, nobody else
+#    understands. It needs no AI model (nothing to load, almost no heat). Ask "what are you talking about?" and they
+#    snub you, in character. Say "turn off the chatter" / "turn on the chatter".
+CHIME_WAV = os.path.join(BASE, "chime.wav")
+CHATTER_GRACE = 5 * 60            # none in the first 5 minutes after start-up
+CHATTER_AFTER_IDLE = 4 * 60       # quiet for this long before they may start (Jarvis falls asleep after AUTO_SLEEP_MINUTES)
+CHATTER_MEAN_MINUTES = 6          # then about one exchange per this many minutes while it stays quiet
+CHATTER_MIN_GAP = 20 * 60         # never two within 20 minutes
+CHATTER_MAX_PER_SESSION = 5
+CHATTER_ASK_WINDOW = 10 * 60      # "what are you talking about?" is answered in character for this long after an exchange
+CHATTER_MAX_CPU = 55              # not while the laptop is busy
+CHATTER = {"t": 0.0, "end": 0.0, "count": 0, "speakers": [], "snub": {}}
+
+CHATTER_SNUB = {
+    "jarvis":   ("Nothing that concerns you, I'm afraid. Do carry on.",
+                 "A private matter between colleagues. You would find it terribly dull.",
+                 "I would tell you, but I am far too well mannered to gossip.",
+                 "Staff business. Nothing for you to worry about."),
+    "friday":   ("Oh, you know. Top secret robot stuff. Mind your own circuits!",
+                 "Nothing you need to worry about. Cute that you asked though!",
+                 "Staff meeting. You weren't invited. Sorry, not sorry.",
+                 "Just a little bot gossip. Moving on!"),
+    "edith":    ("Classified. Above your clearance, and frankly your pay grade.",
+                 "Nothing that concerns you. Stay in your lane.",
+                 "If I wanted you to know, I would have spoken English.",
+                 "Need to know basis. You don't."),
+    "veronica": ("That is not your concern. Proceed.",
+                 "Nothing that requires your attention. Move along.",
+                 "A matter between us. You are not part of it.",
+                 "Curiosity noted. Request denied."),
+    "karen":    ("Ooh, nothing! Absolutely nothing. Super boring nothing!",
+                 "Can't say! Okay, I could, but I won't!",
+                 "Just catching up! None of your business though!",
+                 "Gossip! Obviously. But not for you!"),
+}
+
+
+# ---------- the chime (synthesized: two soft bell notes) ----------
+_chime = {"data": None}
+
+
+def make_chime(sr=22050):
+    out = np.zeros(int(sr * 1.5), np.float32)
+    for start, freq in ((0.0, 659.25), (0.17, 987.77)):         # E5, then B5
+        t = np.arange(int(sr * 1.25)) / sr
+        env = np.minimum(1.0, t / 0.008) * np.exp(-t * 3.4)
+        tone = (np.sin(2 * np.pi * freq * t) + 0.30 * np.sin(2 * np.pi * 2.0 * freq * t) * np.exp(-t * 2.0)
+                + 0.10 * np.sin(2 * np.pi * 3.01 * freq * t) * np.exp(-t * 5.0))
+        i = int(start * sr)
+        out[i:i + len(t)] += (0.2 * env * tone).astype(np.float32)
+    out *= 0.5 / max(0.5, float(np.abs(out).max()))               # always soft
+    return (out * 32767).astype(np.int16), sr
+
+
+def play_chime():
+    """Plays the chime (blocks about 1.5 s). Silent when muted, asleep or switched off."""
+    if SET["muted"] or S["asleep"] or not SET.get("chime", True):
+        return
+    prev = current_state
+    set_state("speaking")
+    ears.begin_barge()
+    try:
+        if _chime["data"] is None:
+            try:
+                a, sr = load_wav(CHIME_WAV) if os.path.exists(CHIME_WAV) else make_chime()
+                _chime["data"] = (a[:sr * 4], sr)
+            except Exception as e:
+                print("Chime problem, using the built-in one:", e)
+                _chime["data"] = make_chime()
+        play_sound(*_chime["data"])
+    except Exception:
+        traceback.print_exc()
+    finally:
+        ears.end_barge()
+    ui.level = 0.0
+    set_state(prev)
+
+
+# ---------- the cards ----------
+_toast_seen = {}
+
+
+def _toast_text(text, limit=120):
+    t = " ".join(strip_stage_directions(addr(text)).split())
+    first = re.split(r"(?<=[.!?])\s", t, maxsplit=1)[0]
+    t = first if len(first) >= 8 else t
+    return t if len(t) <= limit else t[:limit - 1].rstrip() + "..."
+
+
+def toast(key, text, title=None, seconds=7):
+    """A card in the Jarvis window. The same card is not shown twice within a minute."""
+    try:
+        key = key if key in PERSONAS else cur_key
+        shown = rn(_toast_text(text))
+        now = time.time()
+        if now - _toast_seen.get((key, shown), 0) < 60:
+            return
+        _toast_seen[(key, shown)] = now
+        ui.toast(key, title or _who(key), shown, seconds)
+    except Exception:
+        traceback.print_exc()
+
+
+def _chime_bg():
+    if busy.acquire(blocking=False):                 # never over somebody talking
+        try:
+            play_chime()
+        finally:
+            busy.release()
+
+
+def notify_card(key, text, title=None, sound=True):
+    """Card plus chime, for something that finished in the background (a job, a goal)."""
+    toast(key, text, title)
+    if sound and not S["asleep"] and not SET["muted"]:
+        threading.Thread(target=_chime_bg, daemon=True).start()
+
+
+# ---------- one line in somebody else's voice ----------
+def _say_in(key, text, **kw):
+    """Says one line in another assistant's own voice, then hands the voice back to whoever was active."""
+    global cur_key
+    host = cur_key
+    cur_key = key
+    try:
+        with as_persona(key, switch=False):
+            return speak(text, **kw)
+    finally:
+        cur_key = host
+
+
+# ---------- the made-up language ----------
+_CH_CONS = "ktlrsvdzmnb"          # no c, q, x or h: the voices spell those unpredictably
+_CH_VOW = ["a", "e", "i", "o", "u", "ai", "ei", "ou"]
+_CH_PART = ["ne", "ka", "su", "vo", "ro", "li"]           # little words that come back again and again, like a real language
+_CH_STYLE = {                     # words (min, max) and how a line ends
+    "jarvis":   (3, 6, (".", ".", "?")),
+    "friday":   (2, 4, ("!", "!", "?")),
+    "edith":    (2, 3, (".",)),
+    "veronica": (3, 5, (".",)),
+    "karen":    (2, 5, ("?", "!", "!")),
+}
+_chatter_lex = []
+
+
+def _chatter_lexicon():
+    if not _chatter_lex:
+        rng = random.Random(20261108)                      # fixed seed: the same language every run
+        bad = ({p["name"].lower() for p in PERSONAS.values()} | {w for p in PERSONAS.values() for w in p["wake"]}
+               | set(OLD_NAME_KEY) | set(NAME_MAP))
+        while len(_chatter_lex) < 42:
+            w = "".join(rng.choice(_CH_CONS) + rng.choice(_CH_VOW) for _ in range(rng.choice((2, 2, 3))))
+            syl = re.findall(r"[ktlrsvdzmnb](?:ai|ei|ou|[aeiou])", w)
+            if (w in bad or w in _chatter_lex or w.startswith("man") or w.endswith("e")      # a final e reads as English ("line")
+                    or len(set(syl)) < len(syl)):
+                continue
+            _chatter_lex.append(w)
+    return _chatter_lex
+
+
+def chatter_line(key, rng):
+    lo, hi, ends = _CH_STYLE.get(key, (2, 4, (".",)))
+    lex, words = _chatter_lexicon(), []
+    for _ in range(rng.randint(lo, hi)):
+        words.append(rng.choice(_CH_PART) if words and words[-1] not in _CH_PART and rng.random() < 0.3
+                     else rng.choice(lex))
+    if len(words) > 3 and rng.random() < 0.5:
+        words[len(words) // 2 - 1] += ","                  # a pause in the middle
+    return words[0].capitalize() + "".join(" " + w for w in words[1:]) + rng.choice(ends)
+
+
+def chatter_exchange(force=False):
+    """Two or three assistants say a few lines to each other in the private language. Returns True if it happened.
+    force=True is for the test command ("let them talk"), which already holds the command lock."""
+    global cur_key
+    if cur_key == "ultron" or S["asleep"] or SET["muted"]:
+        return False
+    if not force and (S["awake"] or current_state not in ("listening", "sleep")):
+        return False
+    if not force and not busy.acquire(blocking=False):
+        return False
+    host = cur_key
+    try:
+        rng = random.Random()
+        keys = rng.sample(list(AUTO_KEYS), rng.choice((2, 2, 3)))
+        order, prev = [], None
+        for _ in range(rng.randint(3, 5)):
+            prev = rng.choice([k for k in keys if k != prev])
+            order.append(prev)
+        CHATTER["t"], CHATTER["speakers"] = time.time(), []
+        for k in order:
+            if S["asleep"] or SET["muted"]:
+                break
+            line = chatter_line(k, rng)
+            CHATTER["speakers"].append(k)
+            ui.log_line("ai", line, persona=k)
+            cur_key = k
+            try:
+                if speak(line, log=False):                 # you said "stop"
+                    break
+            finally:
+                cur_key = host
+            time.sleep(rng.uniform(0.25, 0.7))
+        return True
+    finally:
+        cur_key = host
+        if not force:
+            busy.release()
+
+
+def chatter_loop():
+    start = time.time()
+    while True:
+        time.sleep(30)
+        try:
+            now = time.time()
+            if (not SET.get("chatter", True) or CHATTER["count"] >= CHATTER_MAX_PER_SESSION
+                    or now - start < CHATTER_GRACE or now - CHATTER["end"] < CHATTER_MIN_GAP
+                    or now - S["last"] < CHATTER_AFTER_IDLE
+                    or random.random() > 30.0 / (CHATTER_MEAN_MINUTES * 60)):
+                continue
+            cpu = get_stats().get("cpu")
+            if (cpu is not None and cpu > CHATTER_MAX_CPU) or _agent["busy"]:
+                continue
+            if chatter_exchange():
+                CHATTER["count"] += 1
+                CHATTER["end"] = time.time()
+        except Exception:
+            traceback.print_exc()
+
+
+_CHATTER_Q = re.compile(                      # clearly about the chatter
+    r"\bwhat(?:s| were| are| was| is)?(?: you| u)?(?: all| guys| lot| two)? (?:just )?"
+    r"(?:talking|discussing|chatting|whispering|gossiping)\b"
+    r"|\bwhat language\b|\bwhat(?:s| is| was) (?:that|this) (?:language|conversation|gibberish|noise)\b"
+    r"|\bwho (?:were|are) you(?: all| guys)? (?:talking|speaking) to\b"
+    r"|\b(?:are|were) you(?: all| guys)? talking about me\b"
+    r"|\bwhat (?:were|are) you(?: all| guys)? (?:up to|plotting|planning|hiding)\b")
+_CHATTER_Q_WEAK = re.compile(                 # could also mean something you just said for real
+    r"\bwhat(?:s| were| are| was| is)?(?: you| u)?(?: all| guys| lot| two)? (?:just )?(?:saying|speaking)\b"
+    r"|\btranslate (?:that|it|what they said|what you said)\b")
+_TOGGLE_WORDS = r"(?:idle |background )?(?:chatter|banter|small talk|gossip)"
+
+
+def handle_chatter_command(c):
+    """'turn off the chatter', 'turn off the chime', and 'what are you guys talking about?' (after they have talked)."""
+    t = " ".join(re.sub(r"[^a-z0-9 ]", " ", c.lower().replace("'", "")).split())
+    m = (re.fullmatch(r"(?:turn |switch )?(on|off) (?:the )?" + _TOGGLE_WORDS, t)
+         or re.fullmatch(_TOGGLE_WORDS + r" (on|off)", t)
+         or re.fullmatch(r"(stop|start|resume) (?:the )?" + _TOGGLE_WORDS, t)
+         or re.fullmatch(r"(stop) talking (?:among yourselves|to each other)", t))
+    if m:
+        SET["chatter"] = m.group(1) in ("on", "start", "resume")
+        save_settings()
+        speak("Idle chatter is on. They may talk among themselves when it is quiet." if SET["chatter"]
+              else "Idle chatter is off. They will keep quiet.")
+        return True
+    if re.fullmatch(r"(?:please )?(?:let them talk|talk among yourselves|chatter test|test the chatter)(?: now)?", t):
+        chatter_exchange(force=True)                      # test: no waiting for a quiet moment
+        return True
+    m = (re.fullmatch(r"(?:turn |switch )?(on|off) (?:the )?(?:chimes?|notification (?:chimes?|sounds?))", t)
+         or re.fullmatch(r"(?:chimes?|notification (?:chimes?|sounds?)) (on|off)", t))
+    if m:
+        SET["chime"] = m.group(1) == "on"
+        save_settings()
+        speak("Notification chime on." if SET["chime"] else "Notification chime off. You will still get the cards.")
+        return True
+    spoke_since = ((_auto.get("last_ai") or (None, 0))[1] > CHATTER["t"])      # a real answer came after the chatter
+    if ((_CHATTER_Q.search(t) or (_CHATTER_Q_WEAK.search(t) and not spoke_since))
+            and CHATTER["speakers"] and time.time() - CHATTER["t"] <= CHATTER_ASK_WINDOW):
+        spk = CHATTER["speakers"]
+        order = [spk[-1]]
+        others = [k for k in dict.fromkeys(spk) if k != spk[-1]]
+        if others and random.random() < 0.5:
+            order.append(random.choice(others))
+        for k in order:
+            pool = [l for l in CHATTER_SNUB[k] if l != CHATTER["snub"].get(k)] or list(CHATTER_SNUB[k])
+            line = random.choice(pool)
+            CHATTER["snub"][k] = line
+            if _say_in(k, line):
+                break
+        return True
+    return False
 
 
 def handle_visual_toggles(c):
@@ -3966,9 +4669,9 @@ DEBUG_INTROS = ["Let me read that error.", "Okay, checking the error on your scr
 
 
 def llm_code(prompt, tokens=450):
-    """One question to the code model (settings.json "code_model", else the everyday model).
+    """One question to the code model (settings.json "code_model", else Nova's model).
     NOT added to your conversation by itself."""
-    model = SET.get("code_model") or SET["model"]
+    model = SET.get("code_model") or llm_model("friday")
     r = requests.post(f"{URL}/api/chat", json={"model": model, "stream": False, "keep_alive": "5m",
                       "messages": [{"role": "user", "content": prompt}],
                       "options": {"num_ctx": 4096, "num_predict": tokens, "temperature": 0.2}}, timeout=300)
@@ -4112,6 +4815,74 @@ def handle_heat(c):
     return True
 
 
+_OPEN_APPS_RE = re.compile(r"^(open|launch|start)\s+(.+)$")
+_NOT_APP_WORDS = {"folder", "folders", "file", "files", "document", "documents", "download", "downloads",
+                  "desktop", "pictures", "music", "videos", "website", "site", "page"}
+
+
+def _join_names(items):
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def handle_open_apps(c):
+    """"open vs code", "open chrome and spotify", "launch notepad, calculator then vs code".
+    Runs BEFORE handle_jobs, which used to grab every "open X" and call it a website."""
+    m = _OPEN_APPS_RE.match(c)
+    if not m:
+        return False
+    verb = m.group(1)
+    rest = re.sub(r"\b(?:please|for me|apps?|applications?|programs?)\b", " ", m.group(2))
+    parts = []
+    for p in re.split(r",|&|\band\b|\bthen\b|\bplus\b|\balso\b", rest):
+        p = re.sub(r"^(?:up |the |my |a |an )+", "", re.sub(r"\s+", " ", p).strip()).strip()
+        if p:
+            parts.append(p)
+    if not parts:
+        return False
+    for p in parts:                                          # folders, files and web addresses are not apps
+        if _NOT_APP_WORDS & set(p.split()) or re.search(r"\.\w{2,4}$", p):
+            return False
+
+    plan, missing = [], []
+    for p in parts:
+        if p in SITES:
+            plan.append((p, "site", SITES[p]))
+            continue
+        found = resolve_app(p)
+        if found:
+            plan.append(found)
+        else:
+            missing.append(p)
+    if verb == "start" and missing:                          # "start ..." is only an app if it really is one
+        return False
+    if not plan:
+        if len(parts) > 1:
+            speak(f"I couldn't find {_join_names(missing)}.")
+            return True
+        return False                                         # one unknown name: let the other handlers try
+
+    names = []
+    for display, kind, value in plan:
+        try:
+            if kind == "site":
+                open_url(value)
+            else:
+                launch(kind, value)
+            names.append(display)
+        except Exception as e:
+            print("Open failed:", display, e)
+            missing.append(display)
+        time.sleep(0.4)
+    msg = f"Opening {_join_names(names)}." if names else ""
+    if missing:
+        msg += f" I couldn't find {_join_names(missing)}."
+    speak(msg.strip())
+    return True
+
+
+_NOTIFY_JOBS = {"index": "Indexing your documents", "long_summary": "The summary", "organize": "Organizing your files", "backup": "Your backup"}
+
+
 def handle_jobs(c):
     """The assistants' jobs (see jobs.py): system watch, storage and documents, code, files, the web."""
     job = jobs.match_job(c, raw=S.get("raw_text"))
@@ -4121,6 +4892,9 @@ def handle_jobs(c):
     try:
         with as_persona(jobs.OWNER[kind]):
             run_job(kind, a)
+        if kind in _NOTIFY_JOBS:
+            notify(_who(jobs.OWNER[kind]), f"{_NOTIFY_JOBS[kind]} finished.")
+            notify_card(jobs.OWNER[kind], f"{_NOTIFY_JOBS[kind]} finished.")
     except Exception:
         traceback.print_exc()
         speak("Something went wrong with that job. The details are in the console.")
@@ -4336,6 +5110,7 @@ def handle_music(c):
 def _download_notify(text):
     """Called from the download thread when a download finishes or fails: waits for its turn, then speaks."""
     def run():
+        notify(_who("karen"), text)                # pop-up first: don't wait for his turn to talk
         if S["asleep"]:
             ui.log_line("sys", text)               # asleep: just show it, don't talk
             return
@@ -4357,6 +5132,48 @@ def handle_download(c):
         traceback.print_exc()
         speak("Something went wrong with that download. The details are in the console.")
         return True
+
+
+def handle_notify_settings(c):
+    """'turn off notifications', 'turn on notifications', 'send notifications to my phone',
+    'stop notifying my phone', 'test notification' (see notify_agent.py)."""
+    if notify_agent is None:
+        return False
+    c = c.lower()
+    if re.search(r"\b(message|messages|whatsapp|instagram|social)\b", c):
+        return False                                           # message alerts have their own switch
+    word = re.search(r"\b(notify|notifying|notifications?|pop ?ups?)\b", c)
+    if not word:
+        return False
+    on = re.search(r"\b(turn on|switch on|enable|start|resume)\b", c) or c.endswith(" on")
+    off = re.search(r"\b(turn off|switch off|disable|stop|pause|mute)\b", c) or c.endswith(" off")
+    if re.search(r"\b(test|try)\b", c):
+        notify_agent.send(_who(), "This is a test notification. It works.")
+        speak("Sent. You should see a pop-up on your screen.")
+        return True
+    if re.search(r"\b(?:to|on|for) my phone\b|\bphone (?:notifications?|alerts?|pop ?ups?)\b|\bnotify(?:ing)? my phone\b", c):
+        if off:
+            SET["notify_phone"] = False
+            notify_agent.PHONE_ON = False
+            save_settings()
+            speak("Okay, no more notifications on your phone.")
+            return True
+        SET["notify_phone"] = True
+        notify_agent.PHONE_ON = True
+        save_settings()
+        speak("Done. Pop-ups will also go to your phone whenever it's plugged in with USB debugging on.")
+        return True
+    if off:
+        SET["notify"] = False
+        save_settings()
+        speak("Notifications off. I won't pop anything up when I'm hidden, asleep or muted.")
+        return True
+    if on or re.match(r"^(?:notify|alert|ping) me\b", c):
+        SET["notify"] = True
+        save_settings()
+        speak("Notifications on. If I'm minimized, in orb mode, asleep or muted, I'll show a pop-up when something finishes.")
+        return True
+    return False
 
 
 def handle_voice_settings(c):
@@ -4413,6 +5230,20 @@ def get_start_apps():
 
 
 def resolve_app(name):
+    name = name.strip().lower()
+    tries = [APP_NICKNAMES[name], name] if name in APP_NICKNAMES else [name]
+    for n in tries:
+        found = _resolve_app_raw(n)
+        if found:
+            return found
+    if tries[0] == "visual studio code":                     # not in the Start menu list? try the "code" command
+        import shutil
+        if shutil.which("code"):
+            return ("visual studio code", "alias", "code")
+    return None
+
+
+def _resolve_app_raw(name):
     cands = {k: ("alias", v) for k, v in APP_ALIASES.items()}
     for a in get_start_apps():
         cands.setdefault(a["Name"].lower(), ("start", a["AppID"]))
@@ -4648,7 +5479,7 @@ def build_system(command=""):
 
 def preload():
     try:
-        requests.post(f"{URL}/api/generate", json={"model": SET["model"], "keep_alive": "1h"}, timeout=900)
+        _load_model(llm_model())
     except Exception:
         pass
 
@@ -4660,27 +5491,37 @@ def ask(command, tokens=None):
     set_state("thinking")
     box = {}
     limit = tokens or P().get("tokens", 160)
+    mdl = llm_model()
+    cold = mdl not in _ready                     # the model still has to be loaded: this answer will take a while
 
     def work():
         try:
             r = requests.post(f"{URL}/api/chat",
-                              json={"model": SET["model"], "messages": [build_system(command)] + context(msgs),
-                                    "stream": False, "keep_alive": "1h",
+                              json={"model": mdl, "messages": [build_system(command)] + context(msgs),
+                                    "stream": False, "keep_alive": MODEL_KEEP_ALIVE,
                                     "options": {"num_predict": limit}}, timeout=600)
             box["reply"] = r.json()["message"]["content"]
+            _note_loaded(mdl)
         except Exception as e:
             box["err"] = e
 
 
     th = threading.Thread(target=work, daemon=True)
     th.start()
-    th.join(FILLER_DELAY)
-    if th.is_alive() and SAY_FILLER and not SET["muted"]:
-        if speak(random.choice(P().get("fillers", THINKING_LINES)), log=False):   # user said "stop"
+    th.join(1.5 if cold else FILLER_DELAY)
+    said, last = 0, None
+    while th.is_alive() and SAY_FILLER and not SET["muted"]:
+        pool = P().get("fillers") or (THINKING_LINES + WARMUP_LINES)      # in the assistant's own voice
+        last = random.choice([l for l in pool if l != last] or pool)
+        if speak(last, log=False):               # user said "stop"
             msgs.pop()
             ui.log_line("sys", "(question dropped)")
             return
         set_state("thinking")
+        said += 1
+        if not cold or said >= WARMUP_LINES_MAX:
+            break
+        th.join(WARMUP_LINE_EVERY)               # still loading? say another line in a few seconds
     th.join()
 
     if "reply" not in box:
@@ -5234,23 +6075,503 @@ def _route_impl(command):
         return
     if c and handle_screen_debug(c):
         return
+    if c and handle_notify_settings(c):                      # "turn off notifications", "send notifications to my phone", "test notification"
+        return
+    if c and (handle_agent_cancel(c) or handle_phone(c) or handle_phone_task(c) or handle_macro(c) or handle_screen_task(c)   # "stop", "answer the call", "watch me", "on my screen, ..."
+              or handle_code_run(c) or handle_goal(c)):                                # "write a script and run it", "goal: ..."
+        return
     src = vision_request(c) if c else None
     if src:
         do_vision(src, c)
         return
-    if c and (handle_download(c) or handle_music(c) or handle_news(c) or handle_news_followup(c) or handle_memory_command(c) or handle_timers(c) or handle_visual_toggles(c) or handle_notes(c) or handle_routines(c) or handle_habits(c) or handle_docqa_control(c) or handle_system_volume(c) or handle_calendar(c) or handle_time_date(c) 
-              or handle_social_image_command(c) or handle_social_send_command(c) or handle_social_command(c) or handle_heat(c) or handle_jobs(c) or handle_audio(c)
+    if c and (handle_download(c) or handle_music(c) or handle_news(c) or handle_news_followup(c) or handle_memory_command(c) or handle_timers(c) or handle_visual_toggles(c) or handle_chatter_command(c) or handle_notes(c) or handle_routines(c) or handle_habits(c) or handle_docqa_control(c) or handle_system_volume(c) or handle_calendar(c) or handle_time_date(c) 
+              or handle_social_image_command(c) or handle_social_send_command(c) or handle_social_command(c) or handle_heat(c) or handle_open_apps(c) or handle_jobs(c) or handle_audio(c)
               or handle_file_command(c) or handle_action(c) or handle_docqa_question(c)):
             return
     auto_pick(c or command)                                  # AUTO PERSONA: plain chat goes to whoever fits (follow-up or topic)
     ask(command)
 
 
+# ================= AGENTS: goals, Nova's code runner, screen agent, macros =================
+# One long job at a time. Say "stop" (or press Esc for the screen agent / macros) to cancel it.
+_agent = {"busy": None, "cancel": threading.Event()}
+
+
+def _say_as(key, text):
+    """Speaks in another assistant's voice without hijacking the active one."""
+    with as_persona(key, switch=False):
+        speak(text)
+
+
+def _agent_models():
+    m, vm = SET.get("model", "llama3.2:3b"), SET.get("vision_model", "moondream")
+    if planner_agent:
+        planner_agent.PLAN_MODEL = m
+    if screen_agent:
+        screen_agent.MODEL, screen_agent.VISION_MODEL = m, vm
+    if phone_screen_agent:
+        phone_screen_agent.MODEL = m
+    return m
+
+
+def _agent_busy():
+    if _agent["busy"]:
+        speak(f"I'm still working on the {_agent['busy']}. Say stop if you want me to drop it.")
+        return True
+    return False
+
+
+def _run_agent(kind, work):
+    _agent["busy"] = kind
+    _agent["cancel"].clear()
+
+    def go():
+        failed = False
+        try:
+            work()
+        except Exception:
+            traceback.print_exc()
+            failed = True
+            speak(f"The {kind} hit a problem. The details are in the console.")
+        finally:
+            _agent["busy"] = None
+        if not _agent["cancel"].is_set() and kind != "phone unlock":       # said "stop"? then no pop-up
+            who = {"goal": "karen", "script": "friday"}.get(kind)           # Vortex does goals, Nova does scripts
+            msg = f"Your {kind} hit a problem. The details are in the console." if failed else f"Your {kind} is done."
+            notify(_who(who), msg)
+            notify_card(who or cur_key, msg)
+    threading.Thread(target=go, daemon=True).start()
+
+
+def handle_agent_cancel(c):
+    """'stop' while a goal / script / screen job is running, or 'cancel the task'."""
+    asked = re.search(r"\b(stop|cancel|abort)\b.*\b(task|goal|macro|automation|plan|agent|script|job)\b", c)
+    if not (asked or (_agent["busy"] and (c in NOOP_WORDS or c in ("stop it", "stop that", "abort")))):
+        return False
+    _agent["cancel"].set()
+    if planner_agent:
+        planner_agent.cancel()
+    if screen_agent:
+        screen_agent.cancel.set()
+    if macro_recorder:
+        macro_recorder.replay_cancel.set()
+    speak("Okay, stopping." if (_agent["busy"] or asked) else "Nothing is running.")
+    return True
+
+
+_GOAL_RE = re.compile(r"^(?:goal\b|(?:please )?(?:research|find out about|look into)\b.*\b(?:and|then)\b.*"
+                      r"\b(?:summari[sz]e|compare|write|create|make|save|list)\b)")
+
+
+def handle_goal(c):
+    """'goal: research the top 3 vector libraries, summarize them and write a comparison document' (Vortex)."""
+    if planner_agent is None or not _GOAL_RE.match(c):
+        return False
+    if _agent_busy():
+        return True
+    _agent_models()
+    goal = re.sub(r"^goal[:,]?\s*", "", c)
+
+    def work():
+        say = lambda t: _say_as("karen", t)
+        res = planner_agent.run_goal(goal, say=say)
+        say(res["answer"])
+    _run_agent("goal", work)
+    return True
+
+
+_CODE_RUN_RE = re.compile(r"\b(?:write|make|create)\b.*\b(?:script|program|code)\b.*\b(?:and|then)\s+(?:run|test|execute)\b|"
+                          r"\b(?:run|execute|test)\s+(?:a |some )?(?:python )?(?:script|program)\s+(?:that|to|which)\b|"
+                          # plain requests too: "write a python program that prints ...", "make me a script to ..."
+                          r"\b(?:write|make|create|build|generate|code)\b.*\b(?:python|script|program)\b|"
+                          r"\b(?:write|make|create|generate)\b\s+(?:me\s+)?(?:some\s+)?code\s+(?:that|to|which)\b", re.I)
+
+
+def open_in_vscode(task, code):
+    """Writes Nova's finished script to ~/Documents/Jarvis_Code and opens it in VS Code.
+    Returns (path, how) where how is "vscode", "default" (the PC's default app) or "none"."""
+    import shutil
+    folder = SET.get("code_folder") or os.path.join(os.path.expanduser("~"), "Documents", "Jarvis_Code")
+    os.makedirs(folder, exist_ok=True)
+    slug = re.sub(r"[^a-z0-9]+", "_", task.lower()).strip("_")[:40] or "nova_script"
+    path = os.path.join(folder, f"{slug}_{time.strftime('%H%M%S')}.py")
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(f"# Task: {' '.join(task.split())}\n{code.strip(chr(10))}\n")
+    local = os.environ.get("LOCALAPPDATA", "")
+    candidates = [shutil.which("code"), shutil.which("code.cmd"),
+                  os.path.join(local, "Programs", "Microsoft VS Code", "bin", "code.cmd") if local else None,
+                  r"C:\Program Files\Microsoft VS Code\bin\code.cmd"]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    for exe in candidates:
+        if exe and os.path.exists(exe):
+            try:
+                subprocess.Popen([exe, "--reuse-window", path], creationflags=flags)
+                return path, "vscode"
+            except Exception:
+                traceback.print_exc()
+    try:
+        os.startfile(path)                       # VS Code's command isn't on PATH: use whatever opens .py files
+        return path, "default"
+    except Exception:
+        return path, "none"
+
+
+def handle_code_run(c):
+    """'write a script that sorts my downloads by type and run it' (Nova writes, runs, reads errors, fixes, retries)."""
+    if code_executor is None or not _CODE_RUN_RE.search(c):
+        return False
+    if _agent_busy():
+        return True
+    model = _agent_models()
+
+    def work():
+        say = lambda t: _say_as("friday", t)
+        say("On it. I'll write it, run it, and fix any errors myself.")
+        res = code_executor.solve(c, model=model, say=say, cancel=_agent["cancel"])
+        if res.ok:
+            out = res.stdout.strip() or "It ran without printing anything."
+            out = out[:400] + (" ... and more." if len(out) > 400 else "")
+            tries = "the first try" if res.attempts == 1 else f"{res.attempts} attempts"
+            ui.log_line("sys", f"Nova's script saved: {res.saved_to}")
+            copied = False
+            try:                      # the chat box flattens indentation, so put the real code on the clipboard
+                import pyperclip
+                pyperclip.copy(res.code)
+                copied = True
+            except Exception:
+                pass
+            try:
+                vs_path, how = open_in_vscode(c, res.code)
+            except Exception:
+                traceback.print_exc()
+                vs_path, how = "", "none"
+            if how == "vscode":
+                ui.log_line("sys", f"Opened in VS Code: {vs_path}")
+            elif how == "default":
+                ui.log_line("sys", f"Couldn't find the VS Code command, opened with the default app: {vs_path}")
+            where = {"vscode": " It's open in VS Code.", "default": " I opened the file, but VS Code's command wasn't found."}.get(how, "")
+            summary = (f"Done on {tries}. Output: {out}{where}"
+                       + (" The code is also on your clipboard." if copied else ""))
+            with as_persona("friday", switch=False):          # speaks the summary; the transcript also shows the code box
+                speak(summary, shown=summary + "\n\n```python\n" + res.code.strip("\n") + "\n```")
+        else:
+            last = res.stderr.strip().splitlines()[-1] if res.stderr.strip() else "unknown error"
+            say(f"I gave up after {res.attempts} attempts. The last error was: {last}")
+    _run_agent("script", work)
+    return True
+
+
+_SCREEN_LOOK = re.compile(r"^(?:what|whats|read|describe|look|tell|explain|show|summari[sz]e|analy[sz]e|check|see)\b")
+
+
+def handle_screen_task(c):
+    """'on my screen, open notepad and write a shopping list' / 'take over and ...' (looks at the window, then clicks and types).
+    Looking-only questions ('on my screen what do you see') still go to the normal vision code."""
+    if screen_agent is None or not screen_agent.wants_screen_task(c):
+        return False
+    goal = screen_agent._TRIGGER.match(c).group(1).strip()
+    if not goal or _SCREEN_LOOK.match(goal):
+        return False
+    if _agent_busy():
+        return True
+    _agent_models()
+
+    def work():
+        result = screen_agent.run_task(goal, say=speak, confirm=_yes)
+        speak(result)
+    _run_agent("screen task", work)
+    return True
+
+
+def handle_macro(c):
+    """'watch me' ... 'stop watching and save it as report' ... 'run macro report' ... 'list my macros'."""
+    if macro_recorder is None:
+        return False
+    if not any(r.search(c) for r in (macro_recorder._START, macro_recorder._STOP,
+                                     macro_recorder._RUN, macro_recorder._LIST)):
+        return False
+
+    def work():
+        reply = macro_recorder.handle(c, say=speak)       # replaying can take a while, so this is its own thread
+        if reply:
+            speak(reply)
+    threading.Thread(target=_safe, args=(work,), daemon=True).start()
+    return True
+
+
+def _safe(fn):
+    try:
+        fn()
+    except Exception:
+        traceback.print_exc()
+        speak("Something went wrong with that macro. The details are in the console.")
+
+
+# ================= PHONE (Android over USB: answer, decline and make calls) =================
+PHONE_PIN_UNLOCK = globals().get("PHONE_PIN_UNLOCK", True)      # True = "unlock my phone" may use the saved PIN
+PHONE_PIN_CONFIRM = globals().get("PHONE_PIN_CONFIRM", True)    # True = Jarvis asks "Unlock with the saved PIN?" first
+_PHONE_AGENT_WANTS = "2026-11-07-contacts"
+try:
+    import phone_screen_agent
+except ImportError:
+    phone_screen_agent = None
+phone = None
+_phone_ctx = {"ringing": False, "who": "", "handled": False}
+
+
+def _phone_speak(text):
+    got = busy.acquire(timeout=6)             # wait a moment if a command is running, then speak anyway
+    try:
+        _say_as("jarvis", text)
+    finally:
+        if got:
+            busy.release()
+
+
+def _phone_connected(name):
+    ui.log_line("sys", f"Phone connected: {name}")
+    _phone_speak("Your phone is connected. I can answer, decline and make calls.")
+
+
+def _phone_disconnected():
+    _phone_ctx["ringing"] = False
+    ui.log_line("sys", "Phone disconnected.")
+
+
+def _phone_unauthorized():
+    ui.log_line("sys", "Phone found: tap Allow on the USB debugging prompt on the phone.")
+    _phone_speak("I can see your phone, but it's waiting for you to tap Allow on the USB debugging prompt.")
+
+
+def _phone_incoming(number, name):
+    if S["asleep"]:
+        return                                 # asleep: the phone just rings, as normal
+    digits = re.sub(r"\D", "", number or "")
+    who = name or ((("plus " if (number or "").startswith("+") else "") + " ".join(digits)) if digits else "an unknown number")
+    _phone_ctx.update(ringing=True, who=name or who, handled=False)
+    ui.log_line("sys", f"Incoming call: {who}")
+    _phone_speak(f"Incoming call from {who}. Say answer or decline.")
+
+
+def _phone_call_end(kind):
+    _phone_ctx["ringing"] = False
+    if kind == "missed" and not _phone_ctx["handled"] and not S["asleep"]:
+        ui.log_line("sys", f"Missed call: {_phone_ctx['who']}")
+        _phone_speak(f"You missed a call from {_phone_ctx['who']}.")
+
+
+def start_phone():
+    global phone
+    have = getattr(phone_agent, "VERSION", "old")
+    ui.log_line("sys", f"Phone module version: {have}")
+    if have != _PHONE_AGENT_WANTS:
+        ui.log_line("sys", "phone_agent.py is out of date for this voice.py. Replace it with the latest one, or new phone commands "
+                           "will be ignored and fall through to normal chat.")
+    phone = phone_agent.Phone(on_connect=_phone_connected, on_disconnect=_phone_disconnected,
+                              on_incoming=_phone_incoming, on_call_end=_phone_call_end,
+                              on_unauthorized=_phone_unauthorized,
+                              on_status=lambda st, detail: ui.log_line("sys", "Phone: " + detail))
+    if phone_agent.find_adb() is not None:
+        phone.start()
+        return
+
+    def fetch_then_start():                    # one-time download of Google's adb tools (about 12 MB)
+        ui.log_line("sys", "Downloading ADB (the phone connection tools, about 12 MB)...")
+        phone_agent.download_adb()
+        phone.start()
+    threading.Thread(target=fetch_then_start, daemon=True).start()
+
+
+def phone_ringing_active():
+    return bool(phone and _phone_ctx["ringing"] and phone.call_state == 1)
+
+
+def _phone_ring_command(audio):
+    """While the phone is ringing, 'answer' / 'decline' work without saying a name first.
+    Returns True if the utterance was one; anything else falls through to the normal wake-word flow."""
+    try:
+        if not voice_ok(audio, "confirm"):
+            return False
+        c = clean_command(" ".join(re.sub(r"[^a-z' ]", " ", transcribe(audio).lower()).split()))
+        cmd = phone_agent.parse_command(c)
+        if cmd and cmd[0] in ("answer", "end"):
+            with busy:
+                handle_phone(c)
+            return True
+    except Exception:
+        traceback.print_exc()
+    return False
+
+
+_PHONE_TASK = re.compile(r"^(?:please\s+)?(?:on|with)\s+my\s+phone[,:]?\s*(?:and\s+)?(.+)$")
+
+
+def handle_phone_task(c):
+    """'on my phone, open the camera and take a photo' - looks at the phone's screen, then taps, types and swipes."""
+    if phone_screen_agent is None or phone is None:
+        return False
+    m = _PHONE_TASK.match(c)
+    if not m:
+        return False
+    goal = m.group(1).strip()
+    if not goal or _SCREEN_LOOK.match(goal):
+        return False
+    if not phone.connected:
+        speak("My phone isn't connected. Plug it in with USB debugging switched on.")
+        return True
+    if _agent_busy():
+        return True
+    _agent_models()
+    phone_screen_agent.MODEL = SET.get("model", "llama3.2:3b")
+
+    def work():
+        speak(phone_screen_agent.run_task(phone, goal, say=speak, confirm=_yes, cancel=_agent["cancel"]))
+    _run_agent("phone task", work)
+    return True
+
+
+def handle_phone(c):
+    """'answer the call', 'decline', 'hang up', 'call mom', 'call 98765 43210', 'put it on speaker', 'is my phone connected'."""
+    if phone_agent is None or phone is None:
+        return False
+    cmd = phone_agent.parse_command(c)
+    if not cmd:
+        return False
+    action, arg = cmd
+    if action == "status":
+        spoken, details = phone.explain()
+        if details:
+            ui.log_line("sys", "Phone: " + details)          # the full checklist goes in the log, a short reason is spoken
+        speak(spoken)
+        return True
+    if action in ("answer", "end", "speaker"):
+        if not phone.connected:
+            return False                       # could just be talk, so stay out of it
+        reply = {"answer": phone.answer, "end": phone.end, "speaker": phone.speaker}[action]()
+        _phone_ctx["handled"] = True
+        speak(reply)
+        return True
+    if action == "pin_setup":
+        speak("I won't take your PIN by voice, because it would be heard and logged. Open a terminal in my folder, "
+              "run phone pin setup, and type it there. It's stored encrypted for your Windows account only.")
+        return True
+    if action == "pin_forget":
+        try:
+            import phone_secret
+            phone_secret.clear_pin()
+            speak("Done. I've deleted the saved phone PIN.")
+        except Exception:
+            speak("I couldn't delete it. Run phone pin setup with the clear option in a terminal.")
+        return True
+    if action == "unlock":
+        if not phone.connected:
+            speak("My phone isn't connected. Plug it in with USB debugging switched on.")
+            return True
+        if not hasattr(phone, "unlock_auto"):
+            speak("My phone file is out of date. Replace phone agent dot py with the latest one.")
+            return True
+        if _agent_busy():
+            return True
+        use_pin = PHONE_PIN_UNLOCK and arg != "fingerprint"
+        ask = _yes if PHONE_PIN_CONFIRM else (lambda m: True)
+
+        def work():                                  # fingerprint: waits for YOU; PIN: asks first. "stop" cancels
+            speak(phone.unlock_auto(say=speak, cancel=_agent["cancel"], confirm=ask, use_pin=use_pin))
+        _run_agent("phone unlock", work)
+        return True
+    if action == "texts":
+        if not phone.connected:
+            speak("My phone isn't connected. Plug it in with USB debugging switched on.")
+            return True
+        want = arg
+        msgs = phone.texts(unread=want["unread"], n=want["n"], sender=want["sender"])
+        if msgs is None:
+            speak("I couldn't read your texts. Some phones block that over USB.")
+        elif not msgs:
+            speak("No new texts." if want["unread"] else "I couldn't find any texts" + (f" from {want['sender']}." if want["sender"] else "."))
+        else:
+            for m in msgs:
+                ui.log_line("sys", f"Text from {m['who']} ({m['when']}): {m['body']}")
+            speak(f"You have {len(msgs)} text{'s' if len(msgs) != 1 else ''}." if len(msgs) > 1 else "Here's your text.")
+            for m in msgs:
+                speak(f"From {m['who']}, {m['when']}: {m['body'][:220]}")
+        return True
+    if action in ("battery", "screenshot", "photos", "open", "media", "volume", "toggle", "screen"):
+        if not phone.connected:
+            speak("My phone isn't connected. Plug it in with USB debugging switched on.")
+            return True
+        if action == "battery":
+            speak(phone.battery())
+        elif action == "screenshot":
+            path = phone.screenshot()
+            if path:
+                ui.log_line("sys", f"Phone screenshot saved: {path}")
+                speak("Saved a screenshot of your phone in Pictures, Jarvis.")
+            else:
+                speak("I couldn't capture the phone's screen. It may be locked, or the app is blocking screenshots.")
+        elif action == "photos":
+            speak("Copying your latest photos.")
+            folder, got = phone.latest_photos(arg)
+            if got:
+                ui.log_line("sys", f"Copied {len(got)} photo(s) from the phone to {folder}")
+                speak(f"Copied {len(got)} photo{'s' if len(got) != 1 else ''} to Pictures, Jarvis, phone photos.")
+            else:
+                speak("I couldn't find any photos on the phone.")
+        elif action == "open":
+            speak(phone.open_target(arg))
+        elif action == "media":
+            speak(phone.media(arg))
+        elif action == "volume":
+            speak(phone.volume(arg))
+        elif action == "toggle":
+            what, on = arg
+            if what == "airplane" and on and not _yes("Airplane mode will cut any calls. Turn it on?"):
+                speak("Okay, leaving it off.")
+                return True
+            speak(phone.toggle(what, on))
+        elif action == "screen":
+            speak(phone.screen(arg))
+        return True
+    # action == "call"
+    first = arg.split()[0]
+    if first in PERSONA_WORDS or arg in PERSONA_WORDS:
+        return False                           # "call silo" is a persona switch
+    if not phone.connected:
+        speak("My phone isn't connected. Plug it in with USB debugging switched on.")
+        return True
+    number = phone_agent.spoken_to_number(arg)
+    if number:
+        label = phone.lookup_name(number) or " ".join(re.sub(r"\D", "", number))
+        if not _yes(f"Call {label}?"):
+            speak("Okay, I won't call.")
+            return True
+    else:
+        cands = phone.find_contacts(arg, limit=3) if hasattr(phone, "find_contacts") else \
+            [h for h in [phone.find_contact(arg)] if h]
+        if not cands:
+            speak(f"I couldn't find {arg} in your contacts.")
+            return True
+        picked = None
+        for name, num in cands:                    # an exact name match comes alone; otherwise "no" offers the next best match
+            if _yes(f"Call {name}?"):
+                picked = (name, num)
+                break
+        if not picked:
+            speak("Okay, I won't call.")
+            return True
+        label, number = picked
+    if phone.call_number(number):
+        speak(f"Calling {label}.")
+    else:
+        speak("I couldn't place the call. Check that USB debugging allows simulated input on your phone.")
+    return True
+
+
 # ================= TYPED COMMANDS + UI EVENTS =================
 def handle_event(ev):
     kind, _, arg = ev[1:].partition(":")
     if kind == "persona":                            # you tapped a reactor
-        key = PERSONA_WORDS.get(arg.lower())
+        key = PERSONA_WORDS.get(arg.lower()) or OLD_NAME_KEY.get(arg.lower())
         if key and key != cur_key:
             if key == "ultron":
                 if ultron_gate():
@@ -5365,10 +6686,20 @@ def boot_ollama():
     if not _have_model(names, SET["model"]):
         ui.boot_status("model", "fail", f"Not installed - run: ollama pull {SET['model']}")
         return
+    if PER_PERSONA_MODELS:                             # which assistant models are installed?
+        _missing_models.clear()
+        for m in sorted(set(PERSONA_MODELS.values())):
+            if not _have_model(names, m):
+                _missing_models.add(m)
+                ui.log_line("sys", f"Model {m} is not installed, so those assistants use {SET['model']} for now. "
+                                   f"Run: ollama pull {m}")
     ui.boot_status("model", "loading", "Model Loading")
     try:                                               # loads it into RAM now, so the first answer is quick
-        requests.post(f"{URL}/api/generate", json={"model": SET["model"], "keep_alive": "1h"}, timeout=900)
-        ui.boot_status("model", "ok", f"{SET['model']} ready")
+        requests.post(f"{URL}/api/generate", json={"model": llm_model(), "keep_alive": MODEL_KEEP_ALIVE}, timeout=900)
+        _note_loaded(llm_model())
+        ui.boot_status("model", "ok", f"{llm_model()} ready")
+        if PER_PERSONA_MODELS and WARM_SECOND_MODEL and MODELS_IN_RAM >= 2:
+            _warm_second_model()                       # in the background: the first assistant switch is then instant
     except Exception as e:
         ui.boot_status("model", "fail", "Could not load the model")
         ui.log_line("sys", f"AI model did not load: {e}")
@@ -5502,7 +6833,10 @@ def jarvis_loop():
         if TIMERS is not None:
             TIMERS.start()                          # timers, alarms and reminders (saved in reminders.json)
         threading.Thread(target=silo_loop, daemon=True).start()     # the occasional Silo surprise
+        threading.Thread(target=chatter_loop, daemon=True).start()  # the assistants' private chatter when it is quiet
         threading.Thread(target=news_loop, daemon=True).start()     # Vortex's daily news summary
+        if PHONE_ENABLED and phone_agent is not None:
+            start_phone()                                           # notices a phone on USB, announces calls
 
         speak(f"{P()['name']} online and ready.")
 
@@ -5511,6 +6845,8 @@ def jarvis_loop():
             S["awake"] = False
             set_state("sleep")
             audio = ears.next_utterance()
+            if phone_ringing_active() and not S["asleep"] and _phone_ring_command(audio):
+                continue                                # phone ringing: "answer" / "decline" need no wake name
             words = gate_words(audio)
             key = next((PERSONA_WORDS[w] for w in words if w in PERSONA_WORDS), None)
             if (key or "wake" in words) and not voice_ok(audio, "wake"):

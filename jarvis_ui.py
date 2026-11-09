@@ -1,4 +1,4 @@
-import ctypes, math, os, queue, random, shutil, socket, threading, time, traceback
+import ctypes, math, os, queue, random, re, shutil, socket, threading, time, traceback
 from collections import deque
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -6,7 +6,7 @@ import numpy as np
 from PIL import Image, ImageOps, ImageTk
 
 from reactors import (S, CX, CY, RING, R_BIG, R_SAT, ORDER, NAMES, DISPLAY, SUBTITLE, THEMES, RED, ORANGE,
-                      Compositor, corrupt_text, mix, ic, CODE_POOL, CONTAIN_SECONDS)
+                      Compositor, corrupt_text, mix, ic, CODE_POOL, CONTAIN_SECONDS, Fx, spring_step)
 from vision import grab_screen_raw
 from ui_effects import Typewriter, drawer_step, menu_icon_lines, is_inside, mood_for
 
@@ -191,6 +191,7 @@ class JarvisUI:
         self.level = self.lvl = 0.0
         self.state, self.mode = "sleep", "main"
         self.sleeping = False
+        self.hidden_now = False           # True while the main window is minimized (kept up to date by _tick; safe to read from any thread)
         self.active = "jarvis"
         self.pname = NAMES[self.active]
         self.g = self.g_t = 0.0           # glitch / takeover level (0..1)
@@ -215,6 +216,10 @@ class JarvisUI:
         self.chat_open, self._click_job, self._moved = False, None, False
         self._px = self._py = self._dx = self._dy = 0
         self._ring_rot = 0.0
+        self._ring_w = 0.035                                     # how fast the orbit turns (a swap kicks it, then friction slows it)
+        self._impact = False                                     # a new assistant is on its way to the middle
+        self._drift = (0.0, 0.0)                                 # the big reactor floats a little
+        self.fx = Fx()                                           # embers, dust, sparks, ripples
         self.vis_open, self.vis_scan, self._vis_job = False, False, None
         self.boot_active = self.boot_fading = False
         self._code_t = 0.0
@@ -231,6 +236,7 @@ class JarvisUI:
         for i, k in enumerate(ORDER):
             act = k == self.active
             self.ent[k] = dict(ang=slots.get(k, 0.0), rad=0.0 if act else RING, R=R_BIG if act else R_SAT,
+                               va=0.0, vr=0.0, vR=0.0,                       # velocities: the reactors have momentum now
                                x=CX, y=CY, ph=i * 1.7, contain=1.0 if k == "ultron" else 0.0,
                                col=list(THEMES[k][0]["listening" if act else "sleep"]),
                                acc=list(THEMES[k][1]["listening" if act else "sleep"]))
@@ -394,7 +400,7 @@ class JarvisUI:
         # the assistant's answers appear word by word with a fade-in and a caret (see ui_effects.py)
         self.tw = Typewriter(self.log, self.root.after,
                              fast=lambda: self.mode != "main" or self.root.state() == "iconic",
-                             caret_off=PANEL)
+                             caret_off=PANEL, code_button=self._code_button, code_font=("Consolas", 10))
 
         # ======== centre: the arc reactors ========
         center = tk.Frame(self.root, bg=BG_HEX)
@@ -501,7 +507,7 @@ class JarvisUI:
         inner.pack(fill="both", expand=True, padx=1, pady=1)
         chdr = tk.Frame(inner, bg=PANEL)
         chdr.pack(fill="x", padx=10, pady=(8, 2))
-        self.chat_name = tk.Label(chdr, text="ECHO", bg=PANEL, fg="#00e5ff",
+        self.chat_name = tk.Label(chdr, text=NAMES["jarvis"].upper(), bg=PANEL, fg="#00e5ff",
                                   font=("Consolas", 11, "bold"))
         self.chat_name.pack(side="left")
         self.chat_status = tk.Label(chdr, text="", bg=PANEL, fg="#5c7a8c", font=("Consolas", 9))
@@ -575,6 +581,66 @@ class JarvisUI:
     def show_vision(self, img, label): self._put("vision", img, label)      # shows the picture + scan line
     def end_vision(self, seconds=8): self._put("vision_end", seconds)       # stops scanning, closes later
 
+    # ---------- notification cards: slide in at the top right of the window, then slide away by themselves ----------
+    def toast(self, key, title, text, seconds=7):
+        """key = the assistant (its colour), title = who is speaking, text = the message. Click a card to dismiss it."""
+        self._put("toast", key, (title, text, seconds))
+
+    def _show_toast(self, key, title, text, seconds):
+        if not hasattr(self, "_toasts"):
+            self._toasts, self._toast_job = [], None
+        try:
+            col = _hexcol(THEMES[key][0]["listening"]) if key in THEMES else "#00e5ff"
+            card = tk.Frame(self.root, bg=PANEL, highlightthickness=1, highlightbackground=col, cursor="hand2")
+            tk.Frame(card, bg=col, width=4).pack(side="left", fill="y")
+            body = tk.Frame(card, bg=PANEL)
+            body.pack(side="left", fill="both", expand=True, padx=10, pady=7)
+            tk.Label(body, text=str(title).upper(), bg=PANEL, fg=col, font=("Consolas", 9, "bold"),
+                     anchor="w").pack(fill="x")
+            tk.Label(body, text=str(text), bg=PANEL, fg="#d6e4f0", font=("Consolas", 10), anchor="w",
+                     justify="left", wraplength=280).pack(fill="x")
+            card.update_idletasks()
+            t = {"card": card, "x": 330.0, "y": None, "h": card.winfo_reqheight(),
+                 "until": time.time() + float(seconds), "dying": False}
+            for w in [card] + card.winfo_children() + body.winfo_children():
+                w.bind("<Button-1>", lambda e, t=t: t.__setitem__("dying", True))
+            self._toasts.append(t)
+            alive = [x for x in self._toasts if not x["dying"]]
+            if len(alive) > 3:                                   # never more than three at once: the oldest one goes
+                alive[0]["dying"] = True
+            if self._toast_job is None:
+                self._toast_tick()
+        except Exception:
+            traceback.print_exc()
+
+    def _toast_tick(self):
+        self._toast_job = None
+        now, y, keep = time.time(), 62, []
+        for t in self._toasts:
+            if not t["dying"] and now >= t["until"]:
+                t["dying"] = True
+            if t["dying"]:
+                t["x"] += (t["x"] + 30) * 0.22                   # slides out to the right
+            else:
+                t["x"] *= 0.80                                   # slides in from the right
+            if t["dying"] and t["x"] > 340:
+                try:
+                    t["card"].destroy()
+                except Exception:
+                    pass
+                continue
+            t["y"] = y if t["y"] is None else t["y"] + (y - t["y"]) * 0.35
+            try:
+                t["card"].place(relx=1.0, x=-16 + int(t["x"]), y=int(t["y"]), anchor="ne")
+                t["card"].lift()
+            except Exception:
+                continue
+            y += t["h"] + 8
+            keep.append(t)
+        self._toasts = keep
+        if keep:
+            self._toast_job = self.root.after(16, self._toast_tick)
+
     def grab_screen(self, timeout=8):
         """Takes a screenshot (call from a non-UI thread). Echo' own windows hide for a moment first."""
         ev, box = threading.Event(), {}
@@ -647,6 +713,11 @@ class JarvisUI:
         self.root.withdraw()
         self.orb.withdraw()
         self._toast(f"Still running in the background. Press {HOTKEY_TEXT} to open it.")
+
+    def is_hidden(self):
+        """True when you can't see the main window: minimized, in orb mode, or hidden in the background.
+        Used by voice.py to decide whether a finished task also needs a Windows pop-up."""
+        return self.mode != "main" or self.hidden_now
 
     def _toast(self, text):
         try:
@@ -733,7 +804,29 @@ class JarvisUI:
             txt = LABELS.get(self.state, "")
         self.chat_status.configure(text=txt)
 
+    def _code_button(self, code):
+        """The COPY button in a code block's header: copies the code exactly as written."""
+        btn = tk.Button(self.log, text="COPY", font=("Consolas", 8, "bold"), fg="#00e5ff", bg="#1b3a57",
+                        activeforeground="#ffffff", activebackground="#24507a", bd=0, relief="flat",
+                        padx=8, pady=0, cursor="hand2")
+
+        def copy():
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(code)
+                self.root.update()
+                btn.configure(text="COPIED \u2713", fg="#69f0ae")
+                self.root.after(1500, lambda: btn.winfo_exists() and btn.configure(text="COPY", fg="#00e5ff"))
+            except Exception:
+                pass
+        btn.configure(command=copy)
+        return btn
+
     def _set_reply(self, who, text):
+        if "```" in text:                             # the small bubble can't show code: point to the transcript
+            prose = re.sub(r"```.*?```", " ", text, flags=re.S)
+            prose = " ".join(prose.split())
+            text = (prose + " " if prose else "") + "(code is in the transcript, with a COPY button)"
         text = text if len(text) <= 330 else text[:327] + "..."
         self.chat_reply.configure(text=f"{who}: {text}",
                                   fg="#e0f7fa" if who == "YOU" else "#9ee8c4")
@@ -1123,16 +1216,17 @@ class JarvisUI:
         return {k: -math.pi / 2 + self._ring_rot + i * 2 * math.pi / n for i, k in enumerate(others)}
 
     def _place_entities(self):
-        for e in self.ent.values():
-            e["x"] = CX + e["rad"] * math.cos(e["ang"])
-            e["y"] = CY + e["rad"] * math.sin(e["ang"])
+        for k, e in self.ent.items():
+            dx, dy = self._drift if k == self.active else (0.0, 0.0)
+            e["x"] = CX + e["rad"] * math.cos(e["ang"]) + dx
+            e["y"] = CY + e["rad"] * math.sin(e["ang"]) + dy
 
     def _update_entities(self, dt, t, st, sleeping):
         """Glides every reactor to where it belongs: the active one to the middle, the rest on the orbit."""
-        a = 1 - math.exp(-dt * 4.2)
         ac = 1 - math.exp(-dt * 5.0)
-        if not sleeping:
-            self._ring_rot += dt * 0.035
+        if not sleeping:                                         # the orbit has inertia: a swap spins it up, friction slows it
+            self._ring_w += (0.035 - self._ring_w) * (1 - math.exp(-dt * 0.9))
+            self._ring_rot += self._ring_w * dt
         slots = self._slots()
         theme_a = THEMES[self.active]
         if self.mood_on and not sleeping and time.time() - self._mood_t > 2.0:      # mood: look again every 2 s
@@ -1145,7 +1239,7 @@ class JarvisUI:
             act = k == self.active
             th = THEMES[k]
             if act:
-                tr, tR = 0.0, R_BIG
+                tr, tR = 0.0, R_BIG * (1.0 + 0.018 * self.lvl)       # the voice makes it swell a little
                 dim = 0.45 if sleeping else 1.0
                 tcol = [v * dim for v in th[0][st]]
                 tacc = [v * dim for v in th[1][st]]
@@ -1153,9 +1247,9 @@ class JarvisUI:
                     tcol = [v * mood[2] for v in mix(tcol, mood[0], mood[1])]
                     tacc = [v * mood[2] for v in mix(tacc, mood[0], mood[1] * 0.6)]
             else:
-                tr, tR = RING, R_SAT * (1.2 if k == self.hover else 1.0)
+                tr, tR = RING + (0.0 if sleeping else 3.2 * math.sin(t * 0.9 + e["ph"])), R_SAT * (1.2 if k == self.hover else 1.0)
                 if e["rad"] < 8:
-                    e["ang"] = slots[k]                    # just left the middle: slide outwards from there
+                    e["ang"], e["va"] = slots[k], 0.0      # just left the middle: slide outwards from there
                 pulse = 0.78 + 0.22 * math.sin(t * 1.3 + e["ph"])
                 hot = k == self.hover
                 tcol = [v * (1.0 if hot else pulse) for v in th[0]["listening" if hot else "sleep"]]
@@ -1163,14 +1257,26 @@ class JarvisUI:
                 if k == "ultron" and self.alert:
                     tcol, tacc = [255, 40, 30], [255, 150, 120]
                 diff = (slots[k] - e["ang"] + math.pi) % (2 * math.pi) - math.pi
-                e["ang"] += diff * a
-            e["rad"] += (tr - e["rad"]) * a
-            e["R"] += (tR - e["R"]) * a
+                e["ang"], e["va"] = spring_step(e["ang"], e["va"], e["ang"] + diff, dt, 18.0, 0.9)    # follows its slot on a spring
+            e["rad"], e["vr"] = spring_step(e["rad"], e["vr"], tr, dt, 42.0, 0.7)       # a little overshoot, then it settles
+            e["R"], e["vR"] = spring_step(e["R"], e["vR"], tR, dt, 46.0, 0.58)
+            e["R"] = max(0.0, e["R"])
             e["col"] = mix(e["col"], tcol, ac)
             e["acc"] = mix(e["acc"], tacc, ac)
             if k == "ultron":
                 ct = 0.0 if act else max(0.0, 1.0 - 0.95 * self.g)           # the cage opens as he takes over
                 e["contain"] += (ct - e["contain"]) * (1 - math.exp(-dt * 3.0))
+        amp = 0.35 if sleeping else 1.0                          # the big reactor floats gently
+        self._drift = (2.4 * amp * math.sin(t * 0.55), 1.9 * amp * math.sin(t * 0.77 + 1.3))
+        m = self.ent[self.active]
+        if self._impact and abs(m["rad"]) < 16 and m["R"] > R_BIG * 0.6:
+            self._impact = False                                 # it has landed in the middle:
+            for k, e in self.ent.items():
+                if k != self.active:
+                    e["vr"] += 130.0                             # the others are pushed outwards (momentum), then spring back
+            c = tuple(m["acc"])
+            self.fx.burst(CX, CY, 46, c, r0=R_BIG * 0.92)        # sparks fly off the rim
+            self.fx.ripple(c)                                    # and a ripple runs out
         self._place_entities()
 
     def _hit(self, mx, my):
@@ -1203,6 +1309,9 @@ class JarvisUI:
         if key not in THEMES:
             return
         old, self.active = self.active, key
+        if old != key:
+            self._impact = True                                  # see _update_entities
+            self._ring_w += 0.9                                  # the orbit gets a kick and slowly winds down
         self.pname = NAMES[key]
         self._cache.clear()
         if key == "ultron" and old != "ultron":
@@ -1217,7 +1326,7 @@ class JarvisUI:
         ult = self.active == "ultron" or g > 0.5
         self._ult_shown = ult
         if ult:
-            t1 = "STATUS: S.I.L.O. NETWORK :: CORRUPTED NEURAL GRID"
+            t1 = f"STATUS: {'.'.join(c for c in NAMES['ultron'].upper() if c.isalnum())}. NETWORK :: CORRUPTED NEURAL GRID"
             if g > 0.2:
                 t1 = corrupt_text(t1, g * 0.6)
             c.itemconfigure(self.title, text=t1, font=("Consolas", 11, "bold"), fill="#ff6a6a")
@@ -1319,7 +1428,7 @@ class JarvisUI:
             self.on_text(text)
 
     def _append(self, who, text, ts=None, live=None, persona=None):
-        names = {"you": "YOU", "ai": "ECHO", "sys": "SYSTEM"}
+        names = {"you": "YOU", "ai": NAMES["jarvis"].upper(), "sys": "SYSTEM"}
         stamp = time.strftime("%H:%M", time.localtime(ts)) if ts else time.strftime("%H:%M")
         # the name comes from whoever SAID it, not from whoever happens to be on screen right now
         label = (NAMES.get(persona) or self.pname).upper() if who == "ai" else names.get(who, who)
@@ -1393,7 +1502,12 @@ class JarvisUI:
 
     def _draw_hud(self, t, dt, st, lvl, sleeping):
         ents = [self._main_entity(k, self.ent[k], st, lvl, k == self.active) for k in ORDER]
-        img = self.comp.render(ents, t, dt, self.g, self.shock, self.alert, self.containment_progress)
+        main = self.ent[self.active]
+        col = tuple(main["acc"])
+        self.fx.update(dt, t, main, st, lvl, sleeping, col)
+        dots, rings = self.fx.primitives(main, col, sleeping)
+        img = self.comp.render(ents, t, dt, self.g, self.shock, self.alert, self.containment_progress,
+                               fx={"dots": dots, "rings": rings})
         self.hud_photo.paste(img)
         c = self.canvas
         for k in ORDER:                                   # names under the small reactors
@@ -1493,6 +1607,8 @@ class JarvisUI:
                     self._boot_skip()
                 elif kind == "mic":
                     self._apply_mic(a)
+                elif kind == "toast":
+                    self._show_toast(a, *b)
                 elif kind == "hotkey_mic":
                     self._toggle_mic()
                 elif kind == "hotkey":
@@ -1541,6 +1657,7 @@ class JarvisUI:
 
         self._tick_vision(t)
         hidden = self.mode == "hidden" or (self.mode == "main" and self.root.state() == "iconic")
+        self.hidden_now = hidden
         if hidden:
             delay = 400                                     # nothing visible: draw nothing, cost nothing
         elif sleeping:

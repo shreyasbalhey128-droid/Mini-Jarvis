@@ -40,6 +40,8 @@ RISKY_HOTKEYS = [{"alt", "f4"}, {"ctrl", "w"}, {"ctrl", "shift", "delete"}, {"sh
 
 cancel = threading.Event()
 _esc_listener = None
+SKIP_TITLES = ("jarvis",)          # window titles containing these are never operated on (Jarvis's own window)
+_state = {"rect": None}            # screen rectangle of the window being operated on (for the vision fallback)
 
 
 # --------------------------------------------------------------------------- plumbing
@@ -65,13 +67,34 @@ def _start_esc_listener():
 
 
 # --------------------------------------------------------------------------- seeing
+def _target_hwnd():
+    """The window to work in: the foreground one, or the next one down if that is Jarvis himself."""
+    import win32con
+    import win32gui
+    fg = win32gui.GetForegroundWindow()
+    hwnd = fg
+    for _ in range(30):
+        title = win32gui.GetWindowText(hwnd) if hwnd else ""
+        if hwnd and win32gui.IsWindowVisible(hwnd) and title and \
+                not any(t in title.lower() for t in SKIP_TITLES):
+            return hwnd
+        hwnd = win32gui.GetWindow(hwnd, win32con.GW_HWNDNEXT) if hwnd else 0
+        if not hwnd:
+            break
+    return fg
+
+
 def observe(max_elems=60, budget=4.0):
     """Return (window title, [elements]) for the foreground window via UI Automation."""
     import win32gui
     from pywinauto import Desktop
 
-    hwnd = win32gui.GetForegroundWindow()
+    hwnd = _target_hwnd()
     title = win32gui.GetWindowText(hwnd)
+    try:
+        _state["rect"] = win32gui.GetWindowRect(hwnd)
+    except Exception:
+        _state["rect"] = None
     root = Desktop(backend="uia").window(handle=hwnd).wrapper_object()
     it = root.iter_descendants() if hasattr(root, "iter_descendants") else iter(root.descendants())
 
@@ -99,9 +122,13 @@ def observe(max_elems=60, budget=4.0):
     return title, elems
 
 
-def describe_screen():
-    """Fallback: a short text description from a small local vision model."""
-    img = _pg().screenshot()
+def describe_screen(rect=None):
+    """Fallback: a short text description (of the window being operated on) from a small local vision model."""
+    if rect:
+        from PIL import ImageGrab
+        img = ImageGrab.grab(bbox=rect, all_screens=True)     # all_screens: the window may be on monitor 2
+    else:
+        img = _pg().screenshot()
     img.thumbnail((1024, 1024))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -214,7 +241,7 @@ def run_task(goal, say=print, confirm=None, max_steps=MAX_STEPS):
             vision = ""
             if len(elems) < 5 and VISION_MODEL:
                 try:
-                    vision = describe_screen()
+                    vision = describe_screen(_state.get("rect"))
                 except Exception:
                     pass
             try:

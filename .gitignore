@@ -46,3 +46,12 @@ jarvis.bat
 # OS junk
 Thumbs.db
 .DS_Store
+
+# Platform tools & binaries (adb, fastboot, etc.)
+platform-tools/
+*.exe
+*.dll
+*.so
+*.dylib
+*.apk
+*.img

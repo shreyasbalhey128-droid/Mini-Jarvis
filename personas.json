@@ -1,0 +1,26 @@
+{
+  "jarvis": {
+    "name": "Echo",
+    "also_hear_as": []
+  },
+  "friday": {
+    "name": "Nova",
+    "also_hear_as": []
+  },
+  "edith": {
+    "name": "Aegis",
+    "also_hear_as": []
+  },
+  "karen": {
+    "name": "Vortex",
+    "also_hear_as": []
+  },
+  "veronica": {
+    "name": "Atlas",
+    "also_hear_as": []
+  },
+  "ultron": {
+    "name": "Silo",
+    "also_hear_as": []
+  }
+}

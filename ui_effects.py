@@ -87,6 +87,24 @@ def is_inside(widget_path, parent_path):
     return w == p or w.startswith(p + ".")
 
 
+# ---------------------------------------------------------------- code blocks in messages
+_FENCE = re.compile(r"```[ \t]*([\w+#.-]*)[ \t]*\r?\n(.*?)```", re.S)
+
+
+def split_code(body):
+    """Cuts a message into [("text", str) | ("code", language, code), ...]. Code is the text between
+    triple backticks, kept exactly as written (indentation included)."""
+    out, pos = [], 0
+    for m in _FENCE.finditer(body):
+        if m.start() > pos:
+            out.append(("text", body[pos:m.start()]))
+        out.append(("code", m.group(1).lower(), m.group(2).rstrip()))
+        pos = m.end()
+    if pos < len(body):
+        out.append(("text", body[pos:]))
+    return out
+
+
 # ---------------------------------------------------------------- typed-out messages
 class Typewriter:
     """Shows chat messages in a tk.Text widget. Assistant answers are revealed word by word (a short
@@ -100,11 +118,12 @@ class Typewriter:
     CARET = "\u258c"
 
     def __init__(self, text, after, now=time.time, fast=None, rng=random.random,
-                 caret_on="#00e5ff", caret_off="#0a1220"):
+                 caret_on="#00e5ff", caret_off="#0a1220", code_button=None, code_font=("Consolas", 10)):
         self.t, self.after, self.now = text, after, now
         self.fast = fast or (lambda: False)
         self.rng = rng
         self.caret_on, self.caret_off = caret_on, caret_off
+        self.code_button = code_button     # code_button(code) -> a widget (the COPY button) or None
         self.jobs = deque()
         self.job = None            # the answer being typed right now
         self.next_at = 0.0
@@ -115,6 +134,11 @@ class Typewriter:
         for name, col, _ in self.FRESH:            # created after the normal tags, so they win
             text.tag_configure(name, foreground=col)
         text.tag_configure("caret", foreground=caret_on)
+        # code blocks: a header strip (language + COPY button) and a darker band with the code in monospace
+        text.tag_configure("code_h", foreground="#69f0ae", background="#142a44", font=(code_font[0], 8, "bold"),
+                           lmargin1=14, lmargin2=14, spacing1=6, spacing3=2)
+        text.tag_configure("code", foreground="#e8f4ff", background="#0b1a2c", font=code_font,
+                           lmargin1=22, lmargin2=22, spacing1=0, spacing3=0, wrap="char")
 
     # ------------------------------------------------------------ public
     def add(self, who, head, body, animate=False):
@@ -194,19 +218,84 @@ class Typewriter:
     def _start(self, job, now):
         who = job["who"]
         self._insert(job["head"], (who + "_h",))
+        has_code = bool(_FENCE.search(job["body"]))
         if not job["animate"]:
-            self._insert(job["body"] + "\n\n", (who,))
+            if has_code:
+                self._put_all(who, self._tokens(job["body"]))
+                self._insert("\n\n", (who,))
+            else:
+                self._insert(job["body"] + "\n\n", (who,))
             return
-        tokens = re.findall(r"\S+\s*|\s+", job["body"])
-        n_words = max(1, sum(1 for tok in tokens if tok.strip()))
+        tokens = self._tokens(job["body"]) if has_code else re.findall(r"\S+\s*|\s+", job["body"])
+        n_words = max(1, sum(1 for tok in tokens if isinstance(tok, str) and tok.strip()))
         base = max(TYPE_MIN_SECONDS, min(TYPE_WORD_SECONDS, TYPE_MAX_SECONDS / n_words))
         self.job = dict(who=who, tokens=tokens, i=0, base=base)
         self.next_at = now + TYPE_START_PAUSE
+
+    @staticmethod
+    def _tokens(body):
+        """Words (strings) and whole code blocks (("code", language, code) tuples) of a message."""
+        words = lambda txt: re.findall(r"\S+\s*|\s+", txt)
+        parts = split_code(body)
+        tokens = []
+        for i, part in enumerate(parts):
+            if part[0] == "code":
+                tokens.append(part)
+                continue
+            txt = part[1]
+            if i > 0:
+                txt = txt.lstrip("\r\n ")                    # right after a code block
+            if i < len(parts) - 1:
+                txt = txt.rstrip() + "\n" if txt.strip() else ""    # right before a code block
+            if txt.strip():
+                tokens.extend(words(txt))
+        return tokens
+
+    def _put_all(self, who, tokens):
+        """Puts tokens on screen at once (consecutive words are inserted as one piece)."""
+        buf = []
+        for tok in tokens:
+            if isinstance(tok, tuple):
+                if buf:
+                    self._insert("".join(buf), (who,))
+                    buf = []
+                self._insert_code(who, tok[1], tok[2])
+            else:
+                buf.append(tok)
+        if buf:
+            self._insert("".join(buf), (who,))
+
+    def _insert_code(self, who, lang, code):
+        """A code block: header strip with the language and a COPY button, then the code, untouched."""
+        t = self.t
+        t.configure(state="normal")
+        try:
+            self._drop_caret()
+            t.insert("end-1c", " " + (lang or "code").upper() + "   ", ("code_h",))
+            if self.code_button is not None:
+                try:
+                    btn = self.code_button(code)
+                    if btn is not None:
+                        t.window_create("end-1c", window=btn, padx=2)
+                        t.tag_add("code_h", "end-2c", "end-1c")
+                except Exception:
+                    traceback.print_exc()
+            t.insert("end-1c", "\n", ("code_h",))
+            t.insert("end-1c", code.rstrip("\n") + "\n", ("code",))
+            t.insert("end-1c", "\n", (who,))
+        finally:
+            t.configure(state="disabled")
 
     def _reveal(self, now):
         job = self.job
         tok = job["tokens"][job["i"]]
         job["i"] += 1
+        if isinstance(tok, tuple):                                 # a code block appears all at once
+            self._insert_code(job["who"], tok[1], tok[2])
+            self.next_at = now + job["base"] * 3
+            if job["i"] >= len(job["tokens"]):
+                self._finish_job()
+            return
         s, e = self._insert(tok, (job["who"], "fresh0"))
         self.fresh.append([s, e, now, 0])
         base = job["base"] * (0.35 if self.jobs else 1.0)        # something is waiting: hurry up
@@ -231,9 +320,7 @@ class Typewriter:
     def _finish_now(self):
         """Put the rest of the current answer on screen at once."""
         job = self.job
-        rest = "".join(job["tokens"][job["i"]:])
-        if rest:
-            self._insert(rest, (job["who"],))
+        self._put_all(job["who"], job["tokens"][job["i"]:])
         job["i"] = len(job["tokens"])
         self._finish_job()
 

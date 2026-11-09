@@ -1,19 +1,63 @@
-name: Python Syntax Check
+name: Mini-Jarvis Strict Lint
 
-on: [push]
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
-  syntax:
+  pylint:
     runs-on: windows-latest
-    
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: "3.10"
-    
-    - name: Check Python syntax
+
+    - name: Install dependencies
       run: |
-        python -m py_compile $(git ls-files '*.py')
+        python -m pip install --upgrade pip
+        pip install pylint
+        # Install project dependencies for import checking
+        pip install -r requirements.txt || echo "Some deps failed, continuing..."
+
+    - name: Run Pylint (strict)
+      run: |
+        # Strict check: errors + warnings + conventions
+        # Score below 7.0/10 = fail
+        pylint **/*.py `
+          --disable=missing-docstring,`
+                    invalid-name,`
+                    too-many-locals,`
+                    too-many-arguments,`
+                    too-many-statements,`
+                    too-many-branches,`
+                    too-many-instance-attributes,`
+                    too-few-public-methods,`
+                    fixme,`
+                    import-error,`
+                    no-name-in-module,`
+                    c-extension-no-member `
+          --max-line-length=120 `
+          --fail-under=7.0
+      shell: pwsh
+
+    - name: Generate Pylint report
+      if: always()
+      run: |
+        pylint **/*.py `
+          --disable=missing-docstring,invalid-name,too-many-locals,too-many-arguments,import-error `
+          --max-line-length=120 `
+          --output-format=text:pylint-report.txt || true
+      shell: pwsh
+
+    - name: Upload Pylint report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: pylint-report
+        path: pylint-report.txt
